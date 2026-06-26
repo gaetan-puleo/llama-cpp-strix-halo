@@ -150,6 +150,9 @@ if (type == GGML_TYPE_NVFP4 || type == GGML_TYPE_MXFP4) {
     return MMQ_ITER_K_FP4;
 }
 #endif // defined(BLACKWELL_MMA_AVAILABLE)
+#if defined(RDNA3_5)
+    return 2*MMQ_ITER_K;
+#endif // defined(RDNA3_5)
     return MMQ_ITER_K;
 }
 
@@ -4173,4 +4176,3 @@ void ggml_cuda_op_mul_mat_q(
     const int64_t src1_padded_row_size, cudaStream_t stream);
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts);
-
