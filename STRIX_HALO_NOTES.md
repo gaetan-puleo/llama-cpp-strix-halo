@@ -955,6 +955,11 @@ Flash Attention runtime check from issue 24437, with rocWMMA still off:
 - Interpretation: issue 24437 means avoid `GGML_HIP_ROCWMMA_FATTN=ON`, not disable runtime Flash Attention. With rocWMMA off, `-fa on` remains best for primary and large-context local tests.
 - Full-risk image is currently the fastest Qwen122 prefill variant measured on this branch, but it is not correctness/quality-conservative because it includes `__expf` and `__float2int_rn` numerical changes.
 
+Follow-up precision cleanup:
+
+- Removed the numerical changes from the current fork path: GDN and SiLU use `expf` again, and `quantize_mmq_q8_1` uses `roundf` again.
+- Kept the non-numerical RDNA3.5 tuning and concat address-hoist changes.
+
 ## MoE Original-vs-Final Scan 2026-06-27
 
 Comparison:

@@ -94,11 +94,7 @@ void ggml_cuda_op_unary_mul(ggml_backend_cuda_context & ctx, ggml_tensor * unary
 void ggml_cuda_op_relu_sqr(ggml_backend_cuda_context & ctx, ggml_tensor * relu_node, ggml_tensor * sqr_node);
 
 __device__ __forceinline__ float ggml_cuda_op_silu_single(float x) {
-#if defined(GGML_USE_HIP) && defined(RDNA3_5)
-    return x / (1.0f + __expf(-x));
-#else
     return x / (1.0f + expf(-x));
-#endif
 }
 
 __device__ __forceinline__ float ggml_cuda_op_gelu_single(float x) {
