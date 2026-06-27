@@ -16,6 +16,12 @@ Priority update 2026-06-27:
 - Final local patch direction: keep `MMVQ+FA` K64 as the MoE-favored version.
 - Accept that `Q2_K_XL` can be slightly better on `MMVQ-only`; choose `MMVQ+FA` because it is better for Q4/Q6/Q8 long-context mixed throughput and the user prefers this version.
 
+Q4 focus update 2026-06-27:
+
+- Active target was narrowed to Qwen3.6 35B-A3B `Q4_K_XL` on Strix Halo, with separate pure `pp` and pure `tg@depth` benchmarks at contexts `5000` and `10000`.
+- Current main checkout extends the same safe scheduling idea beyond Q4: `IQ1_M`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, and `Q8_0` use `nwarps=2` in the RDNA3.5 MMVQ `ncols_dst=1` path.
+- Earlier `MMVQ+FA` K64 notes below are historical for broader MoE tuning; they are not the current source diff for the Q4-focused final patch.
+
 ## Environment
 
 Machine:
@@ -59,18 +65,14 @@ Dirty local experimental build:
 Files changed locally:
 
 - `ggml/src/ggml-cuda/mmvq.cu`
-- `ggml/src/ggml-cuda/mmq.cuh`
-- `ggml/src/ggml-cuda/fattn-tile.cuh`
-- `ggml/src/ggml-cuda/quantize.cu`
 
-Experimental tuning:
+Selected MMVQ tuning:
 
-- `MMVQ` RDNA3.5 generation path: avoid `nwarps=8`.
-- `MMVQ` RDNA3.5: use `nwarps=2` for `Q8_0`, `nwarps=1` for other quant formats.
-- `MMQ` RDNA3.5: test `mmq_x_max=48` while keeping `mmq_y=64` and `nwarps=4`.
-- Flash Attention tile override for RDNA3.5: `DKQ=256`, `DV=256`, `ncols=32`, `256 threads`, `occupancy=3`, `nbatch_fa=64`, `nbatch_K=64`.
-- Quantize: replace `roundf()` hot-path usage with `roundf_to_i8()` based on `__float2int_rz(x +/- 0.5f)` to keep ties-away rounding semantics.
-- Quantize: guard zero-scale cases in `D2S6`, `D4`, and `DS4` layouts to avoid `d=inf` / NaN failures.
+- `MMVQ` RDNA3.5 `ncols_dst=1`: use `nwarps=2` for `IQ1_M`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, and `Q8_0`.
+- Keep `VDR_Q4_K_Q8_1_MMVQ=2`; the attempted `VDR=4` change failed correctness.
+- Keep RDNA3.5 MMQ `x_max=64`; the `48` experiment is rejected/removed.
+- Keep Flash Attention source at baseline for this Q4 final patch; rejected FA K128/K64 experiment changes are removed from the current diff.
+- Quantize changes are removed from the current diff.
 
 ## Important Findings
 
@@ -80,11 +82,13 @@ Generation path:
 - `MMVQ_MAX_BATCH_SIZE` is 8.
 - `MMVQ nwarps=8` is bad for this target: it caused generation regression on the Qwen 4B Q8 canary.
 - External/observed behavior suggests `Q8_0` likes `nwarps=2`, while `Q4_K` can prefer `nwarps=1`.
+- For the active Qwen3.6 35B-A3B `Q4_K_XL` 5k/10k target, `Q4_K nwarps=2` is a correctness-safe win.
 
 Prefill path:
 
 - Quantized prefill goes through `quantize_mmq_q8_1_cuda`, then `MMQ`.
 - The `mmq_x_max=48` experiment is mixed on a small dense Q8 canary. It may still matter more on larger or MoE/Q4/Q5 models.
+- For the active Q4 5k/10k pass, `mmq_x_max=48` was not kept; use `64` as the safe final value.
 
 Vulkan comparison:
 
@@ -109,6 +113,11 @@ Potential host/runtime issue:
 - `test-backend-ops test -b ROCm0 -o MUL_MAT -j 1` passes on `strix-all` after the quantize zero-scale fix.
 - Final result observed: `1134/1134` passed.
 - Previous broken quantize attempt failed 4 `MUL_MAT` cases with NaNs.
+- Latest safe Q4 patch, command `test-backend-ops -o MUL_MAT`, passes `1134/1134` on ROCm0.
+- Latest safe Q4 log: `/home/gaetan/dev/bench-results/qwen36-q4-strix-q4k-nwarps2-only-correctness-20260627-035333`.
+- Expanded MMVQ `nwarps=2` whitelist also passes `1134/1134` on ROCm0.
+- Expanded whitelist correctness log: `/home/gaetan/dev/bench-results/qwen36-strix-expanded-nwarps2-correctness-20260627-040245`.
+- Rejected `VDR_Q4_K_Q8_1_MMVQ=4` failed correctness: `1106/1134`, all failures in Q4_K small-m `MUL_MAT` cases. Do not keep it without a corrected Q4_K MMVQ vec-dot implementation.
 
 Known failed cases from the broken attempt, now fixed:
 
@@ -613,31 +622,97 @@ Result directory:
 - `/home/gaetan/dev/bench-results/qwen36-35b-a3b-downloads-longctx-mmvq-vs-fa-20260627-010901`
 - `/home/gaetan/dev/bench-results/qwen36-35b-a3b-downloads-q3q5q6-longctx-mmvq-vs-fa-20260627-012610`
 
+### Qwen 35B-A3B Q4_K_XL 5k/10k Final Safe Patch
+
+Purpose:
+
+- Focus on Qwen3.6 35B-A3B `Q4_K_XL` only.
+- Use separate pure prefill and pure generation-at-depth measurements.
+- Benchmark only contexts `5000` and `10000`.
+- Preserve quality and correctness; scheduling-only final source diff.
+
+Accepted code change:
+
+- `ggml/src/ggml-cuda/mmvq.cu`: add `GGML_TYPE_Q4_K` to the RDNA3.5 `ncols_dst=1` `nwarps=2` whitelist.
+
+Benchmark comparison, `llama-bench -r 5 -ngl 999 -fa on -mmp 0 -o md`:
+
+| Test | Stable baseline | Final safe patch | Delta |
+| --- | ---: | ---: | ---: |
+| `pp5000` | 1278.83 +/- 8.93 | 1288.05 +/- 3.99 | +0.7% |
+| `pp10000` | 1164.90 +/- 2.43 | 1215.63 +/- 2.25 | +4.4% |
+| `tg128 @ d5000` | 47.52 +/- 0.17 | 47.92 +/- 0.06 | +0.8% |
+| `tg128 @ d10000` | 46.68 +/- 0.16 | 46.93 +/- 0.18 | +0.5% |
+
+Correctness:
+
+- `test-backend-ops -o MUL_MAT` passes: `1134/1134` on ROCm0.
+
+Rejected during this Q4 pass:
+
+- `VDR_Q4_K_Q8_1_MMVQ=4`: rejected because it failed correctness (`1106/1134`) on Q4_K small-m `MUL_MAT` cases.
+- `MMQ x_max=48`: not kept; source restored to `64`.
+- FA K128 for `DKQ=256,DV=256,ncols=32`: rejected because Q4 `pp10000` regressed.
+- MoE `rows_per_block=4`: rejected; source restored to `2` in the MoE path from earlier tuning, and current final diff does not include a rows-per-block change.
+
+Result directories:
+
+- Stable baseline: `/home/gaetan/dev/bench-results/qwen36-q4-strix-current-context-5k10k-repeat-20260627-025152`
+- Final benchmark: `/home/gaetan/dev/bench-results/qwen36-q4-strix-q4k-nwarps2-only-final-context-5k10k-repeat-20260627-035407`
+- Final correctness: `/home/gaetan/dev/bench-results/qwen36-q4-strix-q4k-nwarps2-only-correctness-20260627-035333`
+
+### Qwen 35B-A3B Q8_K_XL Original ROCm vs Strix Prefill
+
+Purpose:
+
+- Compare original ROCm toolbox against the patched Strix toolbox on Q8 pure prefill.
+- Contexts: `5000`, `15000`, `30000`, `60000`.
+- Command shape: `llama-bench -p 5000,15000,30000,60000 -n 0 -r 3 -ngl 999 -fa on -mmp 0 -o md`.
+
+Model:
+
+- `/home/gaetan/Downloads/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`
+
+Results:
+
+| Test | Original ROCm `3fc4e1052` | Patched Strix `f7b3aa558+dirty` | Delta |
+| --- | ---: | ---: | ---: |
+| `pp5000` | 976.68 +/- 6.13 | 1108.68 +/- 4.52 | +13.5% |
+| `pp15000` | 896.31 +/- 3.51 | 1022.75 +/- 2.86 | +14.1% |
+| `pp30000` | 770.67 +/- 6.71 | 884.14 +/- 1.96 | +14.7% |
+| `pp60000` | 607.98 +/- 0.94 | 701.22 +/- 0.52 | +15.3% |
+
+Result directory:
+
+- `/home/gaetan/dev/bench-results/qwen36-q8-original-vs-strix-prefill-5k15k30k60k-20260627-040338`
+
 ### Quant-Specific Code Experiments
 
 Current selected patch:
 
 - `MMVQ` RDNA3.5 warp tuning in `ggml/src/ggml-cuda/mmvq.cu`.
-- `FA` RDNA3.5 K64 override in `ggml/src/ggml-cuda/fattn-tile.cuh`.
-- The main checkout has been reduced to these two code changes; rejected `MMQ48` and `quantize-only` changes were removed from the main working tree.
+- Active RDNA3.5 `ncols_dst=1` `nwarps=2` whitelist: `IQ1_M`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`.
+- The main checkout has been reduced to this one code-change area for the active patch.
+- Rejected `VDR=4`, `MMQ48`, FA, and `quantize-only` changes were removed from the main working tree.
 
 MMVQ generation code paths:
 
 | Quant | MMVQ vecdot path | Current VDR | Observed direction |
 | --- | --- | ---: | --- |
-| `IQ1_M` | `vec_dot_iq1_m_q8_1` | 1 | Mostly insensitive to current tuning; keep as low-memory baseline. |
-| `Q2_K_XL` | `vec_dot_q2_K_q8_1` | 1 | Fastest generation; prefers `MMVQ-only` over K64 FA for mixed. |
-| `Q3_K_XL` | `vec_dot_q3_K_q8_1` | 1 | K64 FA hurts long-context mixed at `pp8192+tg128`; optimize MMVQ/decode, not FA. |
-| `Q4_K_XL` | `vec_dot_q4_K_q8_1` | 2 | Best quality/speed target; keep K64 FA and explore MMVQ vecdot packing. |
-| `Q5_K_XL` | `vec_dot_q5_K_q8_1` | 2 | K64 FA mostly neutral mixed; similar MMVQ experiments to Q4. |
-| `Q6_K_XL` | `vec_dot_q6_K_q8_1` | 1 | K64 FA helps long-context mixed; investigate whether VDR/register pressure can improve generation. |
-| `Q8_K_XL` | `vec_dot_q8_0_q8_1` | existing Q8 path | K64 FA helps long-context mixed; MMVQ Q8_0 warp tuning is already important. |
+| `IQ1_M` | `vec_dot_iq1_m_q8_1` | 1 | Now included in RDNA3.5 `nwarps=2`; needs generation benchmark confirmation. |
+| `Q2_K_XL` | `vec_dot_q2_K_q8_1` | 1 | Now included in RDNA3.5 `nwarps=2`; fastest generation historically, verify no regression. |
+| `Q3_K_XL` | `vec_dot_q3_K_q8_1` | 1 | Now included in RDNA3.5 `nwarps=2`; verify because Q3 has higher unpack/scale overhead. |
+| `Q4_K_XL` | `vec_dot_q4_K_q8_1` | 2 | Active target; keep VDR at 2, use RDNA3.5 `nwarps=2`, and explore vecdot packing only with correctness first. |
+| `Q5_K_XL` | `vec_dot_q5_K_q8_1` | 2 | Now included in RDNA3.5 `nwarps=2`; similar MMVQ behavior expected to Q4. |
+| `Q6_K_XL` | `vec_dot_q6_K_q8_1` | 1 | Now included in RDNA3.5 `nwarps=2`; verify because VDR remains 1. |
+| `Q8_K_XL` | `vec_dot_q8_0_q8_1` | existing Q8 path | Already included in RDNA3.5 `nwarps=2`; Q8 prefill comparison versus original ROCm is strong. |
 
 Candidate experiments, in priority order:
 
-- Q4/Q6/Q8: keep `MMVQ+FA` and run higher-rep confirmation because these are the selected fork targets.
+- Q4: keep the safe `nwarps=2` patch; any `VDR=4` revisit must first fix Q4_K coverage and pass `test-backend-ops`.
 - Q4/Q5: investigate whether the `VDR=2` K-quant vecdot path can reuse/preload Q8_1 data more efficiently, similar to Vulkan `block_q8_1_x4` ideas.
-- Q6: test a local-only `VDR_Q6_K_Q8_1_MMVQ=2` variant if compilation/register pressure is acceptable; current Q6 uses VDR 1 but benefits from K64 FA.
+- Q1/Q2/Q3/Q5/Q6: run pure `tg@depth` checks to confirm the expanded `nwarps=2` whitelist is a performance win, not just correctness-safe.
+- Q6: test a local-only `VDR_Q6_K_Q8_1_MMVQ=2` variant only after the `nwarps=2` result is measured; current Q6 uses VDR 1.
 - Q2/Q3: avoid FA changes; if optimizing later, focus on reducing scale/unpack overhead inside `vec_dot_q2_K_q8_1` and `vec_dot_q3_K_q8_1`.
 - IQ1_M: no immediate kernel work unless it becomes the deployed quantization; current tuning has little effect.
 - Cross-cutting: explore a Vulkan-style MMVQ redesign with packed `Q8_1` activation loads and fewer shared-memory reductions, but only after the small selected patch is preserved.
