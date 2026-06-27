@@ -860,6 +860,101 @@ Interpretation:
 - The largest remaining prefill target is still quantized MMQ for `Q5_K/Q6_K/Q8_0`, likely requiring layout/repack or deeper kernel work rather than simple launch-parameter retuning.
 - A future larger GDN optimization would be the existing TODO: a chunked prefill kernel.
 
+Lychee Strix Halo build-flags check:
+
+- Reference repo inspected: `https://github.com/Lychee-Technology/llama-cpp-for-strix-halo`.
+- The repo packages upstream llama.cpp builds; it does not carry llama.cpp HIP/CUDA kernel patches.
+- Tested local image: `llama-rocm-7.2.4-strix-lychee-flags`.
+- Added only these build flags over the final source: `-DCMAKE_HIP_FLAGS="--rocm-path=/opt/rocm -mllvm --amdgpu-unroll-threshold-local=600"`, `-DCMAKE_C_FLAGS="-O3 -march=znver5 -mtune=znver5"`, and `-DCMAKE_CXX_FLAGS="-O3 -march=znver5 -mtune=znver5"`.
+- Correctness: `GATED_DELTA_NET 36/36`, `MUL_MAT_ID 790/790`.
+- Result directory: `/home/gaetan/dev/bench-results/lychee-flags-rdna35-20260627-133555`.
+
+| Model | Test | Final | Lychee flags | Decision |
+| --- | --- | ---: | ---: | --- |
+| Qwen3.5 122B-A10B Q5_K_M | `pp10000`, `r3 --no-warmup` | 384.00 +/- 1.06 | 381.70 +/- 0.41 | Reject; small prefill regression. |
+| Qwen3.5 122B-A10B Q5_K_M | `tg128 @ d10000`, `r3 --no-warmup` | 17.10 +/- 1.58 | 17.21 +/- 1.35 | Neutral/noisy. |
+| GPT-OSS 20B MXFP4 | `pp10000`, `r5 --no-warmup` | 1909.37 +/- 31.29 | 1906.97 +/- 22.83 | Neutral/slightly negative. |
+| GPT-OSS 20B MXFP4 | `tg128 @ d10000`, `r5 --no-warmup` | 64.42 +/- 0.21 | 64.51 +/- 0.27 | Neutral. |
+
+- Do not keep the Lychee compiler flags in the final ROCm 7.2.4 Strix build based on these measurements.
+- Still potentially worth testing separately later: a TheRock/ROCm 7.14 image. Do not infer a ROCm 7.14 result from this ROCm 7.2.4 flags-only A/B.
+
+GDN fast-exp experimental check:
+
+- Tested local image/toolbox: `llama-rocm-7.2.4-strix-gdnfastexp`.
+- Source delta: GDN-only helper uses `__expf` instead of `expf` for `GGML_USE_HIP && RDNA3_5`; no MMQ/MMVQ/quantize/SiLU changes.
+- Correctness: `test-backend-ops -o GATED_DELTA_NET -j 1` passed `36/36`.
+- Result directory: `/home/gaetan/dev/bench-results/gdn-fast-exp-rdna35-20260627-141712`.
+
+| Test | Final | GDN fast-exp | Decision |
+| --- | ---: | ---: | --- |
+| Qwen3.5 122B-A10B Q5_K_M `pp10000`, `r3 --no-warmup` | 389.78 +/- 0.28 | 393.14 +/- 0.57 | Small positive. |
+| Qwen3.5 122B-A10B Q5_K_M `pp10000`, reversed rerun `r3 --no-warmup` | 365.89 +/- 8.73 | 378.25 +/- 9.40 | Positive but noisy. |
+| Qwen3.5 122B-A10B Q5_K_M `pp10000`, `r5 --no-warmup` | 363.61 +/- 12.21 | 369.10 +/- 6.57 | Small positive, still noisy. |
+| Qwen3.5 122B-A10B Q5_K_M `tg128 @ d10000`, `r3 --no-warmup` | 17.75 +/- 0.14 | 17.18 +/- 1.33 | Noisy/negative. |
+| Qwen3.5 122B-A10B Q5_K_M `tg128 @ d10000`, `r5 --no-warmup` | 17.01 +/- 1.25 | 17.47 +/- 1.02 | Noisy/positive. |
+
+GDN micro-perf highlights from `test-backend-ops perf -o GATED_DELTA_NET`:
+
+| Case | Final | GDN fast-exp | Note |
+| --- | ---: | ---: | --- |
+| `head_count=32,head_size=128,n_seq_tokens=64,kda=0` | 160.85 us/run | 150.84 us/run | Faster. |
+| `head_count=32,head_size=128,n_seq_tokens=512,kda=0` | 1829.18 us/run | 1510.88 us/run | Faster. |
+| `head_count=32,head_size=128,n_seq_tokens=1024,kda=0` | 3551.08 us/run | 4186.42 us/run | Slower. |
+| `head_count=32,head_size=128,n_seq_tokens=64,kda=1` | 197.77 us/run | 173.88 us/run | Faster. |
+
+- Keep this as a separate risky/private experimental image only. Do not merge into the safe final branch without explicitly accepting the precision change from `expf` to `__expf`.
+
+Issue 21284 / 24437 full-risk speed check:
+
+- Issue 21284: `https://github.com/ggml-org/llama.cpp/issues/21284`.
+- Issue 24437: `https://github.com/ggml-org/llama.cpp/issues/24437`.
+- Tested local image/toolbox: `llama-rocm-7.2.4-strix-risky21284`.
+- ROCm/rocWMMA policy from issue 24437: keep `GGML_HIP_ROCWMMA_FATTN=OFF` for `gfx1151`; our Dockerfile already leaves this off.
+- Full-risk source delta over final source:
+  - `mmq.cuh`: RDNA3.5 `mmq_x_max=48` instead of `64`.
+  - `gated_delta_net.cu`: GDN-only `__expf` for `GGML_USE_HIP && RDNA3_5`.
+  - `unary.cuh`: SiLU uses `__expf` for `GGML_USE_HIP && RDNA3_5`.
+  - `quantize.cu`: `quantize_mmq_q8_1` uses `__float2int_rn` for `GGML_USE_HIP && RDNA3_5`.
+  - `concat.cu`: corrected loop-invariant address hoist; not the gist's direct version, because the direct gist version double-counts offsets for non-zero concat dimensions.
+- Not a delta: `common.cuh` `sudot4` is already active on `gfx1151` because `RDNA3` and `RDNA3_5` are both defined.
+- Not a delta: RDNA3.5 `MMVQ` table split, `mmq_y=64`, and MMQ `nwarps=4` are already present in the current final source.
+- Correctness passed on the full-risk image: `CONCAT 112/112`, `SILU 4/4`, `GATED_DELTA_NET 36/36`, `MUL_MAT 1134/1134`.
+- Result directory: `/home/gaetan/dev/bench-results/risky21284-rdna35-20260627-145540`.
+
+Issue-style local Q4 short-prefill A/B, `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`, `-p 128,256,512,1024,2048 -n 0 -r 3 -ngl 999 -fa on -mmp 0 -dio 1 -b 2048 -ub 2048`:
+
+| Test | Final | Full-risk | Delta |
+| --- | ---: | ---: | ---: |
+| `pp128` | 848.82 +/- 21.67 | 841.60 +/- 61.33 | -0.85% |
+| `pp256` | 1171.30 +/- 13.05 | 1194.85 +/- 13.54 | +2.01% |
+| `pp512` | 1349.70 +/- 5.46 | 1375.54 +/- 1.54 | +1.91% |
+| `pp1024` | 1435.91 +/- 10.79 | 1451.39 +/- 9.74 | +1.08% |
+| `pp2048` | 1452.02 +/- 5.18 | 1463.66 +/- 19.12 | +0.80% |
+
+Primary target A/B, `Qwen3.5-122B-A10B-UD-Q5_K_M`, `-r 3 --no-warmup -ngl 999 -fa on -mmp 0`:
+
+| Test | Final | Full-risk | Delta |
+| --- | ---: | ---: | ---: |
+| `pp10000` | 370.61 +/- 0.46 | 379.81 +/- 0.93 | +2.48% |
+| `tg128 @ d10000` | 16.62 +/- 2.35 | 17.24 +/- 1.34 | +3.73%, noisy |
+
+Flash Attention runtime check from issue 24437, with rocWMMA still off:
+
+| Model | Build | Test | `-fa off` | `-fa on` | Decision |
+| --- | --- | --- | ---: | ---: | --- |
+| Qwen3.6 35B Q4_K_XL | Final | `pp512` | 1355.23 +/- 9.57 | 1347.21 +/- 5.72 | off slightly faster/noisy. |
+| Qwen3.6 35B Q4_K_XL | Final | `pp2048` | 1381.71 +/- 8.65 | 1483.24 +/- 6.42 | keep FA on. |
+| Qwen3.6 35B Q4_K_XL | Final | `pp8192` | 1155.13 +/- 2.11 | 1362.80 +/- 6.58 | keep FA on. |
+| Qwen3.6 35B Q4_K_XL | Full-risk | `pp512` | 1363.55 +/- 7.11 | 1371.40 +/- 5.62 | keep FA on. |
+| Qwen3.6 35B Q4_K_XL | Full-risk | `pp2048` | 1363.02 +/- 11.17 | 1412.32 +/- 3.85 | keep FA on. |
+| Qwen3.6 35B Q4_K_XL | Full-risk | `pp8192` | 1206.93 +/- 3.60 | 1362.13 +/- 8.26 | keep FA on. |
+| Qwen3.5 122B Q5_K_M | Final | `pp10000` | 303.61 +/- 66.56 | 385.20 +/- 7.22 | keep FA on. |
+| Qwen3.5 122B Q5_K_M | Full-risk | `pp10000` | 311.10 +/- 62.37 | 393.94 +/- 4.48 | keep FA on. |
+
+- Interpretation: issue 24437 means avoid `GGML_HIP_ROCWMMA_FATTN=ON`, not disable runtime Flash Attention. With rocWMMA off, `-fa on` remains best for primary and large-context local tests.
+- Full-risk image is currently the fastest Qwen122 prefill variant measured on this branch, but it is not correctness/quality-conservative because it includes `__expf` and `__float2int_rn` numerical changes.
+
 ## MoE Original-vs-Final Scan 2026-06-27
 
 Comparison:

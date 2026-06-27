@@ -332,10 +332,17 @@ static __global__ void quantize_mmq_q8_1(
 
     const float d_inv = 127.0f / amax;
     char4 q;
+#if defined(GGML_USE_HIP) && defined(RDNA3_5)
+    q.x = (char) __float2int_rn(xi.x*d_inv);
+    q.y = (char) __float2int_rn(xi.y*d_inv);
+    q.z = (char) __float2int_rn(xi.z*d_inv);
+    q.w = (char) __float2int_rn(xi.w*d_inv);
+#else
     q.x = roundf(xi.x*d_inv);
     q.y = roundf(xi.y*d_inv);
     q.z = roundf(xi.z*d_inv);
     q.w = roundf(xi.w*d_inv);
+#endif
 
     // Write back 4 int8 values as a single 32 bit value for better memory bandwidth:
     char4 * yqs4 = (char4 *) y[ib].qs;

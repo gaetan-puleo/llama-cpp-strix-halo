@@ -107,7 +107,7 @@ struct tile_x_sizes {
 };
 
 static int get_mmq_x_max_host(const int cc) {
-    if (GGML_CUDA_CC_IS_RDNA3_5(cc)) { return 64; }
+    if (GGML_CUDA_CC_IS_RDNA3_5(cc)) { return 48; }
     return (turing_mma_available(cc) || amd_wmma_available(cc)) ? 128 :
         GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA ?
 #ifdef GGML_CUDA_FORCE_MMQ
@@ -119,7 +119,7 @@ static int get_mmq_x_max_host(const int cc) {
 
 static constexpr __device__ int get_mmq_x_max_device() {
 #if defined(RDNA3_5)
-    return 64;
+    return 48;
 #elif defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     return 128;
 #else // defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
