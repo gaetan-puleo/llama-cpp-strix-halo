@@ -64,11 +64,15 @@ Dirty local experimental build:
 
 Files changed locally:
 
+- `ggml/src/ggml-cuda/gated_delta_net.cu`
 - `ggml/src/ggml-cuda/mmvq.cu`
 
 Selected MMVQ tuning:
 
 - `MMVQ` RDNA3.5 `ncols_dst=1`: use `nwarps=2` for `IQ1_M`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, and `Q8_0`.
+- Post-commit local experiment: also test `GGML_TYPE_MXFP4` in the RDNA3.5 `ncols_dst=1` `nwarps=2` whitelist.
+- Post-commit local experiment: add RDNA3.5-specific `MUL_MAT_ID` MMVQ max-batch thresholds for `IQ4_XS` and `Q5_K`, raising both to `MMVQ_MAX_BATCH_SIZE`.
+- Post-commit local experiment: RDNA3.5 `GATED_DELTA_NET`, `S_v=128`, `KDA=false`, `keep_rs=false` uses `num_warps=8`; default path remains `num_warps=4`.
 - Keep `VDR_Q4_K_Q8_1_MMVQ=2`; the attempted `VDR=4` change failed correctness.
 - Keep RDNA3.5 MMQ `x_max=64`; the `48` experiment is rejected/removed.
 - Keep Flash Attention source at baseline for this Q4 final patch; rejected FA K128/K64 experiment changes are removed from the current diff.
@@ -118,6 +122,8 @@ Potential host/runtime issue:
 - Expanded MMVQ `nwarps=2` whitelist also passes `1134/1134` on ROCm0.
 - Expanded whitelist correctness log: `/home/gaetan/dev/bench-results/qwen36-strix-expanded-nwarps2-correctness-20260627-040245`.
 - Rejected `VDR_Q4_K_Q8_1_MMVQ=4` failed correctness: `1106/1134`, all failures in Q4_K small-m `MUL_MAT` cases. Do not keep it without a corrected Q4_K MMVQ vec-dot implementation.
+- RDNA3.5 `MUL_MAT_ID` max-batch experiment passed targeted `IQ4_XS` and `Q5_K` checks, and full `test-backend-ops -o MUL_MAT_ID -j 1` passed `790/790`.
+- RDNA3.5 `GATED_DELTA_NET num_warps=8` final targeted correctness passed `36/36`.
 
 Known failed cases from the broken attempt, now fixed:
 
@@ -716,6 +722,193 @@ Candidate experiments, in priority order:
 - Q2/Q3: avoid FA changes; if optimizing later, focus on reducing scale/unpack overhead inside `vec_dot_q2_K_q8_1` and `vec_dot_q3_K_q8_1`.
 - IQ1_M: no immediate kernel work unless it becomes the deployed quantization; current tuning has little effect.
 - Cross-cutting: explore a Vulkan-style MMVQ redesign with packed `Q8_1` activation loads and fewer shared-memory reductions, but only after the small selected patch is preserved.
+
+## MoE MMID Max-Batch Experiment 2026-06-27
+
+Change under test:
+
+- Add `get_mmvq_mmid_max_batch_rdna3_5()` in `ggml/src/ggml-cuda/mmvq.cu`.
+- On RDNA3.5, route `IQ4_XS` and `Q5_K` `MUL_MAT_ID` batches up to `MMVQ_MAX_BATCH_SIZE` through MMVQ.
+- Host dispatch must test `GGML_CUDA_CC_IS_RDNA3_5(cc)` before `GGML_CUDA_CC_IS_RDNA3(cc)` because `gfx1151` matches both.
+
+Primary models:
+
+- Step-3.7-flash IQ4_XS: `/home/gaetan/models/step-3.7-flash/unsloth/Step-3.7-flash-IQ4_XS-00001-of-00003.gguf`
+- Qwen3.5 122B-A10B Q5_K_M: `/home/gaetan/models/qwen3.5/122B/unsloth/mtp/Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf`
+- MiniMax: blocked, no matching local GGUF found under `/home/gaetan`.
+
+Qwen3.5 122B tensor mix from split shards `00002/00003`:
+
+- `ffn_gate_exps`: `Q5_K`, 49 tensors, shape `(3072, 1024, 256)`.
+- `ffn_up_exps`: `Q5_K`, 49 tensors, shape `(3072, 1024, 256)`.
+- `ffn_down_exps`: mostly `Q6_K`, 48 tensors, shape `(1024, 3072, 256)`, plus one `Q8_0` tensor.
+- Shared experts are `Q8_0`; router/gating tensors are `F32`/`BF16`.
+
+Same-run comparison against clean `llama-rocm-7.2.4-strix-mxfp4only` where available:
+
+| Model | Test | Clean/control | MMID max-batch experiment |
+| --- | --- | ---: | ---: |
+| Step-3.7-flash IQ4_XS | `pp10000` | 370.01 +/- 7.07 | 375.53 +/- 1.45 |
+| Step-3.7-flash IQ4_XS | `tg128 @ d10000` | 24.30 +/- 0.08 | 24.32 +/- 0.07 |
+| Qwen3.5 122B-A10B Q5_K_M | `tg128 @ d10000` | 17.44 +/- 1.87 | 18.28 +/- 0.02 |
+| Qwen3.5 122B-A10B Q5_K_M | `pp10000` | 341.36 +/- 18.78 | 346.52 +/- 6.27; rerun 344.90 +/- 4.45 |
+
+Rejected follow-ups from hipEngine-inspired Qwen122 pass:
+
+| Change | Qwen122 `tg128 @ d10000` | Qwen122 `pp10000` | Decision |
+| --- | ---: | ---: | --- |
+| Add `Q6_K` to RDNA3.5 MMID max-batch | 17.61 +/- 0.12 | 340.62 +/- 4.81 | Reject; down-expert `Q6_K` MMVQ at batch 8 is slower. |
+| Set MoE MMVQ `rows_per_block=4` | 17.93 +/- 0.20 | not run | Reject; worse than default `2`. |
+
+Interpretation:
+
+- Correctness is clean for `MUL_MAT_ID`.
+- `IQ4_XS` appears neutral for Step generation and likely positive/stabilizing for Step prefill.
+- `Q5_K` appears positive for Qwen122 generation, but Qwen122 prefill is noisy. Earlier non-A/B baseline was 354.53 +/- 1.46, so do not claim a prefill win yet.
+- Keep this as an experiment until a higher-confidence Qwen122 prefill comparison or a generation-priority decision is made.
+- hipEngine useful ideas are layout/repack/fusion oriented: T16 selected GGUF layouts for `Q4_K/Q5_K/Q6_K`, compact selected-MoE WMMA prefill, selected GEMV decode, graph replay, and launch-count reduction. These are not small source tweaks in llama.cpp and should be treated as larger future work. Because hipEngine is AGPL-3.0, use it only as design reference, not as copied code.
+
+Result directory:
+
+- `/home/gaetan/dev/bench-results/moe-mmid-rdna35-maxbatch-20260627-055213`
+- `/home/gaetan/dev/bench-results/qwen122-mmid-q5q6-rdna35-20260627-101206`
+- `/home/gaetan/dev/bench-results/qwen122-mmid-q5-rpb4-rdna35-20260627-102607`
+
+## Qwen122 ROCm Profiling And GDN Experiment 2026-06-27
+
+Primary model:
+
+- `/home/gaetan/models/qwen3.5/122B/unsloth/mtp/Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf`
+
+Decode profile, `tg32`:
+
+- Result directory: `/home/gaetan/dev/bench-results/qwen122-rocprof-tg32-20260627-103922`.
+- Benchmark under profiler: `tg32 17.41 +/- 0.00`.
+- Kernel dispatch total: `1.596569133s`, `61767` dispatches.
+- Dominant kernels:
+
+| Kernel family | Calls | Time | Share |
+| --- | ---: | ---: | ---: |
+| `mul_mat_vec_q` `Q8_0`, no fusion | 6208 | 805.87 ms | 50.48% |
+| `mul_mat_vec_q` `Q5_K`, fusion | 1536 | 257.09 ms | 16.10% |
+| `mul_mat_vec_q` `Q6_K`, no fusion | 1504 | 181.65 ms | 11.38% |
+| `mul_mat_vec_q` `Q8_0`, fusion | 1920 | 100.48 ms | 6.29% |
+| `mul_mat_vec_f` | 5376 | 59.59 ms | 3.73% |
+
+Decode interpretation:
+
+- Pure generation is dominated by `ncols_dst=1` MMVQ kernels, not the multi-token MoE `mul_mat_vec_q_moe` path.
+- This explains why further `MUL_MAT_ID` max-batch tuning is not the main decode lever.
+- Simple `nwarps=4` follow-ups were tested and rejected.
+
+Prefill profile, `pp10000`:
+
+- Result directory: `/home/gaetan/dev/bench-results/qwen122-rocprof-pp10000-20260627-110314`.
+- Benchmark under profiler: `pp10000 339.04 +/- 0.00`.
+- Kernel dispatch total: `29.250170559s`, `53039` dispatches.
+- Dominant kernels:
+
+| Kernel family | Calls | Time | Share |
+| --- | ---: | ---: | ---: |
+| `mul_mat_q` `Q5_K`, MMQ | 1920 | 6.598 s | 22.56% |
+| `gated_delta_net_cuda<128,false,false>` | 720 | 6.306 s | 21.56% |
+| `mul_mat_q` `Q6_K`, MMQ | 940 | 5.212 s | 17.82% |
+| `mul_mat_q` `Q8_0`, MMQ | 6020 | 4.074 s | 13.93% |
+| `flash_attn_tile<256,256,4,8,false>` | 240 | 2.221 s | 7.59% |
+
+GDN trace notes:
+
+- Qwen122 uses `gated_delta_net_cuda<128,false,false>` with `block=(32,4,1)` and `grid=(2048,4,32)` in the baseline.
+- One GDN dispatch was a `1038.149 ms` outlier; without that, GDN still remains a major prefill hotspot.
+- GDN duration distribution from trace: p50 `7.405 ms`, p90 `10.787 ms`, p95 `11.432 ms`, p99 `12.350 ms`.
+
+Rejected follow-ups:
+
+| Change | Correctness | Main result | Decision |
+| --- | --- | --- | --- |
+| `Q8_0 nwarps=4` for RDNA3.5 MMVQ `ncols_dst=1` | `Q8_0 MUL_MAT 47/47` | `tg32` noise-positive, but `tg128 @ d10000` `17.25 +/- 1.40` vs control `17.30 +/- 1.36` | Reject; no priority decode win. |
+| `Q5_K/Q6_K nwarps=4` for RDNA3.5 MMVQ `ncols_dst=1` | targeted `46/46` | `tg32` `18.13 +/- 0.17` vs control `18.80 +/- 0.16` | Reject; clear decode regression. |
+| `GATED_DELTA_NET num_warps=2` | `36/36` | `pp10000` `350.21 +/- 1.43` vs control `354.59 +/- 0.95` | Reject; prefill regression. |
+
+Accepted local GDN change:
+
+- On RDNA3.5 only, for `GATED_DELTA_NET` with `S_v=128`, `KDA=false`, and `keep_rs=false`, use `num_warps=8` instead of the default `4`.
+- The default GDN path remains `num_warps=4` for other architectures and other GDN modes.
+- Correctness: final targeted `test-backend-ops -o GATED_DELTA_NET -j 1` passed `36/36`.
+
+Qwen122 A/B for GDN `num_warps=8`:
+
+| Test | Control | GDN `num_warps=8` |
+| --- | ---: | ---: |
+| `pp10000` first A/B | 342.15 +/- 7.67 | 366.86 +/- 4.04 |
+| `pp10000` rerun, reversed order | 343.47 +/- 7.47 | 367.62 +/- 6.87 |
+| `pp10000` final targeted image | not rerun | 369.55 +/- 9.48 |
+| `tg32` | 19.07 +/- 0.27 | 18.99 +/- 0.42; final image 19.08 +/- 0.24 |
+| `tg128 @ d10000` | 17.37 +/- 1.36 | 17.42 +/- 1.33 |
+
+GDN result directories:
+
+- `/home/gaetan/dev/bench-results/qwen122-q8w4-rdna35-20260627-104852`
+- `/home/gaetan/dev/bench-results/qwen122-q5q6w4-rdna35-20260627-105910`
+- `/home/gaetan/dev/bench-results/qwen122-gdnw2-rdna35-20260627-110900`
+- `/home/gaetan/dev/bench-results/qwen122-gdnw8-rdna35-20260627-111814`
+- `/home/gaetan/dev/bench-results/qwen122-final-rdna35-20260627-114045`
+
+Interpretation:
+
+- The next small accepted optimization target is GDN prefill scheduling, not Flash Attention.
+- The largest remaining prefill target is still quantized MMQ for `Q5_K/Q6_K/Q8_0`, likely requiring layout/repack or deeper kernel work rather than simple launch-parameter retuning.
+- A future larger GDN optimization would be the existing TODO: a chunked prefill kernel.
+
+## MoE Original-vs-Final Scan 2026-06-27
+
+Comparison:
+
+- Original container: `llama-rocm-7.2.4`, build `3fc4e1052 (9820)`.
+- Final container: `llama-rocm-7.2.4-strix-final`, build `a63032352 (9825)`.
+- Main scan used `-r 1 --no-warmup` for coverage across all local MoE GGUF entries.
+- `qwen35-35b-a3b-q6 tg128 @ d10000` was rerun with `-r 3 --no-warmup` because the first single-run result looked like a regression.
+
+Result directory:
+
+- `/home/gaetan/dev/bench-results/moe-original-vs-final-20260627-120716`
+
+Summary:
+
+| Model | Test | Original | Final | Delta |
+| --- | --- | ---: | ---: | ---: |
+| Qwen3.5 122B-A10B Q5_K_M | `pp10000` | 231.97 | 359.92 | +55.16% |
+| Qwen3.5 122B-A10B Q5_K_M | `tg128 @ d10000` | 18.14 | 18.45 | +1.71% |
+| Step-3.7-flash IQ4_XS | `pp10000` | 258.88 | 377.73 | +45.91% |
+| Step-3.7-flash IQ4_XS | `tg128 @ d10000` | 20.23 | 20.40 | +0.84% |
+| GPT-OSS 120B MXFP4_MOE | `pp10000` | 617.48 | 739.47 | +19.76% |
+| GPT-OSS 120B MXFP4_MOE | `tg128 @ d10000` | 32.98 | 45.04 | +36.57% |
+| GPT-OSS 20B MXFP4 | `pp10000` | 1574.89 | 1892.08 | +20.14% |
+| GPT-OSS 20B MXFP4 | `tg128 @ d10000` | 63.25 | 64.08 | +1.31% |
+| Qwen3.6 35B-A3B Q8_K_XL | `pp10000` | 950.99 | 1112.12 | +16.94% |
+| Qwen3.6 35B-A3B Q8_K_XL | `tg128 @ d10000` | 42.27 | 42.62 | +0.83% |
+| Qwen3.6 35B-A3B Q6_K_XL | `pp10000` | 858.57 | 956.68 | +11.43% |
+| Qwen3.6 35B-A3B Q6_K_XL | `tg128 @ d10000` | 43.77 | 44.54 | +1.76% |
+| Qwen3.5 35B-A3B IQ4_XS | `pp10000` | 886.42 | 1096.12 | +23.66% |
+| Qwen3.5 35B-A3B IQ4_XS | `tg128 @ d10000` | 49.09 | 50.86 | +3.61% |
+| Qwen3.5 35B-A3B MXFP4_MOE | `pp10000` | 1000.44 | 1255.82 | +25.53% |
+| Qwen3.5 35B-A3B MXFP4_MOE | `tg128 @ d10000` | 46.16 | 45.85 | -0.67% |
+| Qwen3.5 35B-A3B Q6_K | `pp10000` | 751.76 | 964.42 | +28.29% |
+| Qwen3.5 35B-A3B Q6_K | `tg128 @ d10000` | 41.86 +/- 7.31 | 47.33 +/- 0.26 | +13.07% |
+| Qwen3.5 35B-A3B BF16 | `pp10000` | 455.99 | 462.70 | +1.47% |
+| Qwen3.5 35B-A3B BF16 | `tg128 @ d10000` | 22.60 | 22.50 | -0.44% |
+| Qwen3-Coder-Next Q8_K_XL | `pp10000` | 602.43 | 701.69 | +16.48% |
+| Qwen3-Coder-Next Q8_K_XL | `tg128 @ d10000` | 33.03 | 33.77 | +2.24% |
+| Qwen3-Coder-Next Q6_K_XL | `pp10000` | 542.49 | 697.10 | +28.50% |
+| Qwen3-Coder-Next Q6_K_XL | `tg128 @ d10000` | 34.92 | 34.97 | +0.14% |
+| Ornith 35B Q8_0 | `pp10000` | 879.10 | 1053.20 | +19.80% |
+| Ornith 35B Q8_0 | `tg128 @ d10000` | 41.87 | 43.63 | +4.20% |
+
+Notes:
+
+- `Step3.7-flash-mtp-Q8_0.gguf` failed with exit `139` on both original and final, so it is not a final-build regression.
+- Final is strongly better for prefill across usable local MoE models.
+- Generation is mostly neutral-to-positive; small single-run negatives on MXFP4/BF16 are noise-level unless strict `-r 3` confirmation is needed.
 
 ## Blockers and Annoyances
 
