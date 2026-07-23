@@ -118,27 +118,27 @@ podman build --no-cache -t llama-rocm-strixhalo -f .devops/strix-halo.Dockerfile
 
 ## Publishing
 
-CI (`.github/workflows/strix-halo-toolbox.yml`) builds the image and pushes it to
-the GitHub Container Registry (`ghcr.io`) using the built-in `GITHUB_TOKEN`, so
-there are no secrets to configure.
+Build the image locally (see above), then push it to a registry by hand. Example
+with GitHub Container Registry (`ghcr.io`):
 
-- Trigger it from the Actions tab (`workflow_dispatch`) or by pushing changes to
-  `.devops/strix-halo.Dockerfile` or the workflow on `strix-halo-rework`.
-- It publishes two tags: `rocm-7.2.4` (rolling) and `rocm-7.2.4_<timestamp>`
-  (immutable).
-- New GHCR packages are private by default. Make it public once under
-  repo -> Packages -> Package settings -> Change visibility.
+```sh
+# log in once (create a PAT with write:packages)
+echo "$GHCR_TOKEN" | podman login ghcr.io -u gaetan-puleo --password-stdin
 
-To publish to Docker Hub instead, set the `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN` repo secrets, then swap the login step and the `REGISTRY` /
-`IMAGE` values in the workflow.
+# tag and push (image name must be lowercase)
+podman tag llama-rocm-strixhalo ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.2.4
+podman push ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.2.4
+```
+
+New GHCR packages are private by default; make it public once under
+repo -> Packages -> Package settings -> Change visibility. Docker Hub works the
+same way (`podman login docker.io`, then tag/push to `docker.io/<user>/...`).
 
 ## Files
 
 | Path | Role |
 | --- | --- |
 | `.devops/strix-halo.Dockerfile` | Multi-stage build: compile this repo, then a slim ROCm runtime. |
-| `.github/workflows/strix-halo-toolbox.yml` | CI: build, smoke test, and push to `ghcr.io/<owner>/<repo>`. |
 | `toolbox/refresh-toolbox.sh` | Pull the published image and (re)create the local toolbox. |
 | `toolbox/README.md` | This document. |
 
@@ -150,8 +150,8 @@ To publish to Docker Hub instead, set the `DOCKERHUB_USERNAME` and
   `--direct-io`. See [Running Inference](#running-inference).
 - **Build runs out of memory** - HIP compilation is heavy; give the builder more
   RAM/swap or lower the parallel job count.
-- **`docker push` denied on ghcr.io** - the workflow needs `packages: write`
-  permission (already set) and the image name must be lowercase.
+- **`podman push` denied on ghcr.io** - log in with a PAT that has
+  `write:packages`, and make sure the image name is lowercase.
 
 ## Acknowledgements
 
@@ -172,7 +172,7 @@ To publish to Docker Hub instead, set the `DOCKERHUB_USERNAME` and
   it belong to him.
 - **[kyuz0/amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes)**
   - the packaging approach here (multi-stage Fedora + ROCm Dockerfile, refresh
-  script, CI matrix, and the host kernel parameters) is modeled on that project.
+  script, and the host kernel parameters) is modeled on that project.
   Huge thanks to kyuz0 for the reference work and benchmarks.
 - **[ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)** - the upstream
   project this fork is based on.
