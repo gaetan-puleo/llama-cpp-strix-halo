@@ -39,7 +39,7 @@ carries the Strix-Halo-specific kernel work assembled in this fork:
 ```sh
 # Fedora (toolbox). Ubuntu/Debian users: use `distrobox` instead of `toolbox`.
 toolbox create llama-rocm-strixhalo \
-  --image ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14 \
+  --image docker.io/higaetan/strix-halo-toolbox:rocm-7.14 \
   -- --device /dev/dri --device /dev/kfd --group-add video --group-add render \
      --group-add sudo --security-opt seccomp=unconfined
 
@@ -128,21 +128,20 @@ podman build --no-cache -t llama-rocm-strixhalo -f .devops/strix-halo.Dockerfile
 
 ## Publishing
 
-Build the image locally (see above), then push it to a registry by hand. Example
-with GitHub Container Registry (`ghcr.io`):
+Build the image locally (see above), then push it to Docker Hub by hand:
 
 ```sh
-# log in once (create a PAT with write:packages)
-echo "$GHCR_TOKEN" | podman login ghcr.io -u gaetan-puleo --password-stdin
+# log in once (create an access token: Docker Hub -> Account Settings ->
+# Security -> New Access Token, with Read/Write scope)
+podman login docker.io -u higaetan
 
-# tag and push (image name must be lowercase)
-podman tag llama-rocm-strixhalo ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14
-podman push ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14
+# tag and push
+podman tag llama-rocm-strixhalo docker.io/higaetan/strix-halo-toolbox:rocm-7.14
+podman push docker.io/higaetan/strix-halo-toolbox:rocm-7.14
 ```
 
-New GHCR packages are private by default; make it public once under
-repo -> Packages -> Package settings -> Change visibility. Docker Hub works the
-same way (`podman login docker.io`, then tag/push to `docker.io/<user>/...`).
+The repository is created automatically on first push; set it public under
+Docker Hub -> the repo -> Settings -> Make public.
 
 ## Files
 
@@ -160,8 +159,8 @@ same way (`podman login docker.io`, then tag/push to `docker.io/<user>/...`).
   `--direct-io`. See [Running Inference](#running-inference).
 - **Build runs out of memory** - HIP compilation is heavy; give the builder more
   RAM/swap or lower the parallel job count.
-- **`podman push` denied on ghcr.io** - log in with a PAT that has
-  `write:packages`, and make sure the image name is lowercase.
+- **`podman push` denied on Docker Hub** - run `podman login docker.io` with an
+  access token that has Read/Write scope.
 
 ## Acknowledgements
 

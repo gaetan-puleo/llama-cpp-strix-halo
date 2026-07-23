@@ -4,7 +4,7 @@
 set -e
 
 # Built from .devops/strix-halo.Dockerfile and pushed manually (lowercase owner/repo).
-IMAGE="ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14"
+IMAGE="docker.io/higaetan/strix-halo-toolbox:rocm-7.14"
 NAME="llama-rocm-strixhalo"
 OPTS="--device /dev/dri --device /dev/kfd --group-add video --group-add render --group-add sudo --security-opt seccomp=unconfined"
 
