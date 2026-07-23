@@ -36,18 +36,37 @@ carries the Strix-Halo-specific kernel work assembled in this fork:
 
 ## Quick Start
 
+Works with both **toolbox** (Fedora) and **distrobox** (Ubuntu/Debian/others).
+Note the different way each passes device flags.
+
+**toolbox:**
+
 ```sh
-# Fedora (toolbox). Ubuntu/Debian users: use `distrobox` instead of `toolbox`.
-toolbox create llama-rocm-strixhalo \
+toolbox create strix-halo \
   --image docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14 \
   -- --device /dev/dri --device /dev/kfd --group-add video --group-add render \
      --group-add sudo --security-opt seccomp=unconfined
 
-toolbox enter llama-rocm-strixhalo
+toolbox enter strix-halo
+```
+
+**distrobox:**
+
+```sh
+distrobox create --name strix-halo \
+  --image docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14 \
+  --additional-flags "--device /dev/dri --device /dev/kfd --group-add video --group-add render --group-add sudo --security-opt seccomp=unconfined"
+
+distrobox enter strix-halo
+```
+
+Then inside either:
+
+```sh
 llama-cli --list-devices
 ```
 
-Or use the helper, which pulls the latest image and (re)creates the container:
+Or use the helper (auto-detects toolbox vs distrobox, or force with `RUNNER=`):
 
 ```sh
 ./toolbox/refresh-toolbox.sh

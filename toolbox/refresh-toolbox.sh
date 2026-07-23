@@ -1,24 +1,40 @@
 #!/usr/bin/env bash
-# Pull the latest published image and (re)create the Toolbx/Distrobox container.
-#   ./toolbox/refresh-toolbox.sh
+# Pull the latest published image and (re)create the container.
+# Works with both toolbox (Fedora) and distrobox (Ubuntu/Debian/others).
+#   ./toolbox/refresh-toolbox.sh              # auto-detect
+#   RUNNER=distrobox ./toolbox/refresh-toolbox.sh   # force distrobox
+#   RUNNER=toolbox   ./toolbox/refresh-toolbox.sh   # force toolbox
 set -e
 
-# Built from .devops/strix-halo.Dockerfile and pushed manually (lowercase owner/repo).
 IMAGE="docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14"
-NAME="llama-rocm-strixhalo"
+NAME="strix-halo"
 OPTS="--device /dev/dri --device /dev/kfd --group-add video --group-add render --group-add sudo --security-opt seccomp=unconfined"
 
-# toolbox on Fedora, distrobox on Debian/Ubuntu.
-TOOLBOX_CMD="toolbox"
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  if [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then TOOLBOX_CMD="distrobox"; fi
+# Pick the runner: explicit RUNNER wins; else toolbox on Fedora, distrobox elsewhere;
+# else whichever is installed.
+RUNNER="${RUNNER:-}"
+if [ -z "$RUNNER" ]; then
+  RUNNER="toolbox"
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    case "$ID $ID_LIKE" in *ubuntu*|*debian*) RUNNER="distrobox";; esac
+  fi
+  command -v "$RUNNER" >/dev/null 2>&1 || { command -v distrobox >/dev/null 2>&1 && RUNNER=distrobox; }
+  command -v "$RUNNER" >/dev/null 2>&1 || { command -v toolbox   >/dev/null 2>&1 && RUNNER=toolbox; }
 fi
-command -v podman >/dev/null || { echo "podman not installed"; exit 1; }
-command -v "$TOOLBOX_CMD" >/dev/null || { echo "$TOOLBOX_CMD not installed"; exit 1; }
 
-echo "🔄 Refreshing $NAME ($IMAGE)"
-$TOOLBOX_CMD list | grep -q "$NAME" && $TOOLBOX_CMD rm -f "$NAME"
+command -v podman   >/dev/null 2>&1 || { echo "podman not installed"; exit 1; }
+command -v "$RUNNER" >/dev/null 2>&1 || { echo "$RUNNER not installed"; exit 1; }
+
+echo "Refreshing '$NAME' via $RUNNER ($IMAGE)"
 podman pull "$IMAGE"
-$TOOLBOX_CMD create "$NAME" --image "$IMAGE" -- $OPTS
-echo "✅ ready — enter with: $TOOLBOX_CMD enter $NAME"
+
+if [ "$RUNNER" = "distrobox" ]; then
+  distrobox rm -f "$NAME" 2>/dev/null || true
+  distrobox create --name "$NAME" --image "$IMAGE" --additional-flags "$OPTS"
+else
+  toolbox list | grep -q "$NAME" && toolbox rm -f "$NAME" || true
+  toolbox create "$NAME" --image "$IMAGE" -- $OPTS
+fi
+
+echo "Ready. Enter with: $RUNNER enter $NAME"
