@@ -5720,7 +5720,7 @@ struct test_concat : public test_case {
     const std::array<int64_t, 4> ne_a;
     const int64_t ne_b_d;
     const int dim;
-    const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim))
+    const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim), 1 << 4: transposed b)
 
     std::string vars() override {
         return VARS_TO_STR5(type, ne_a, ne_b_d, dim, v);
@@ -5755,7 +5755,14 @@ struct test_concat : public test_case {
             ggml_set_name(a, "a");
         }
         ggml_tensor * b;
-        if (v & 2) {
+        if (v & 16) {
+            std::swap(ne_b[0], ne_b[1]);
+            b = ggml_new_tensor(ctx, type, 4, ne_b.data());
+            ggml_set_name(b, "b");
+
+            b = ggml_transpose(ctx, b);
+            ggml_set_name(b, "transposed_b");
+        } else if (v & 2) {
             auto ne = ne_b; ne[0] *= 3; ne[1] *= 2; ne[2] *= 4;
             b = ggml_new_tensor(ctx, type, 4, ne.data());
             ggml_set_name(b, "b");
@@ -8988,6 +8995,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_F16, GGML_TYPE_F32, 1, 1, false, 8, 16, 1));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_F16, GGML_TYPE_F32, 16, 10, false, 64, 17, 64));
+    test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_Q4_K, GGML_TYPE_F32, 16, 10, false, 64, 17, 256, 2));
     test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_F16, GGML_TYPE_F32, 16, 16, false, 32, 32, 32, 3));
 
     // gpt-oss issue with Vulkan mmq_id
@@ -9292,6 +9301,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {17, 35, 1, 1}, 67, 0, 16));
+
     for (ggml_sort_order order : {GGML_SORT_ORDER_ASC, GGML_SORT_ORDER_DESC}) {
         for (uint32_t i = 4; i <= 1024*1024; i *= 2) {
             test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {i-1, 1, 1, 1}));
@@ -9498,9 +9509,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                 if (nh == 1 && hsk != 320 && hsk != 576) continue;
                                 for (int nr3 : { 1, 3, }) {
                                     if (hsk > 64 && nr3 > 1) continue; // skip broadcast for large head sizes
-                                    for (int nr2 : { 1, 4, 8, 12, 16, 20, 32 }) {
-                                        // gqa_ratio 8 at hsk=128 is the Qwen3-30B-A3B / Llama-class shape
-                                        // (32 Q heads / 4 KV heads) and drives the ncols2=8 GQA-batched path.
+                                    for (int nr2 : { 1, 4, 6, 8, 9, 12, 16, 20, 32 }) {
+                                        if ((nr2 == 6 || nr2 == 9) && hsk != 128) continue;
                                         if (nr2 ==  8 && hsk != 192 && hsk != 128) continue;
                                         if (nr2 == 12 && hsk != 128) continue;
                                         if (nr2 == 16 && hsk != 192) continue;
@@ -9513,8 +9523,6 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                 for (ggml_prec prec : {GGML_PREC_F32, GGML_PREC_DEFAULT}) {
                                                     if (hsk != 128 && prec == GGML_PREC_DEFAULT) continue;
                                                     for (ggml_type type_KV : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_0, GGML_TYPE_IQ4_NL}) {
-                                                        // Quantized KV was only ever tested at hsk 64/72, leaving hsk=128
-                                                        // (Qwen3 / Llama / Mistral class) and hsk=256 with no coverage.
                                                         if (type_KV != GGML_TYPE_F16 && hsk != 64 && hsk != 72 && hsk != 128 && hsk != 256) continue;
                                                         test_cases.emplace_back(new test_flash_attn_ext(
                                                                     hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, type_KV));
@@ -9883,14 +9891,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
-    // Quantized KV at head size 128 with GQA (e.g. Qwen3-30B-A3B: 32 Q heads / 4 KV heads).
-    // The quantized cases above only cover hsk=64; the hsk=128 sweep is F16-only, so the most common
-    // real-world quantized-KV shape had no coverage. nb=1 exercises the decode path specifically.
-    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
-    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
-    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
-    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
-    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680,   2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {6, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {8, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {9, 1},  512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {

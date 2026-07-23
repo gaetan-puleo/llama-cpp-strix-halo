@@ -703,7 +703,7 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         flash_attn_tile_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K, use_logit_softcap, oob_check, T_vec_dot, type_K>(
             Q_tmp, K_h2, K_c, KV_tmp, stride_K2, stride_K_bytes, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
     }
-    if (nbatch_K_last > 0) {
+    if constexpr (nbatch_K_last > 0) {
         constexpr int k_KQ_0 = DKQ - nbatch_K_last;
         flash_attn_tile_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, use_logit_softcap, oob_check, T_vec_dot, type_K>(
             Q_tmp, K_h2, K_c, KV_tmp, stride_K2, stride_K_bytes, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
