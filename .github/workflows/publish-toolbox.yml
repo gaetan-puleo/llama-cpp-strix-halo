@@ -1,0 +1,66 @@
+name: Publish Strix Halo Toolbox
+
+# Builds this repo into the Strix Halo ROCm toolbox image on a GitHub-hosted
+# runner and pushes it to Docker Hub. ROCm is downloaded at build time from
+# AMD's official tarball mirror (repo.amd.com), so no GPU or self-hosted runner
+# is needed. Modeled on kyuz0/amd-strix-halo-toolboxes.
+#
+# One-time setup: repo -> Settings -> Secrets and variables -> Actions -> add
+#   DOCKERHUB_USERNAME = higaetan
+#   DOCKERHUB_TOKEN    = <Docker Hub access token, Read/Write>
+#
+# The cloud runner cannot test on a gfx1151 GPU; it only smoke-tests that the
+# binary loads. Pull and run the first published image on the actual hardware.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rocm_version:
+        description: "ROCm tarball version at repo.amd.com (gfx1151)"
+        required: false
+        default: "7.13.0"
+
+env:
+  IMAGE: docker.io/higaetan/strix-halo-llamacpp-toolbox
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build, smoke-test and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROCM_VERSION="${{ github.event.inputs.rocm_version || '7.13.0' }}"
+          TAG="rocm-$(echo "$ROCM_VERSION" | cut -d. -f1,2)"      # e.g. rocm-7.13
+          STAMP="$(date +%Y%m%d)"
+
+          echo "Building ${IMAGE}:${TAG} (ROCm ${ROCM_VERSION})"
+          docker build --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+            -t "${IMAGE}:${TAG}" -f .devops/strix-halo.Dockerfile .
+
+          echo "Smoke test (no GPU on the runner)"
+          docker run --rm "${IMAGE}:${TAG}" llama-cli --version \
+            || { s=$?; [ "$s" -eq 0 ] || [ "$s" -eq 1 ]; }
+
+          echo "Pushing ${TAG} and ${TAG}_${STAMP}"
+          docker tag "${IMAGE}:${TAG}" "${IMAGE}:${TAG}_${STAMP}"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:${TAG}_${STAMP}"
