@@ -19,15 +19,9 @@ on:
         description: "ROCm tarball version at repo.amd.com (gfx1151)"
         required: false
         default: "7.14.0"
-  push:
-    branches: [master]
-    paths:
-      - '.devops/strix-halo.Dockerfile'
-      - '.github/workflows/publish-toolbox.yml'
-      - 'ggml/**'
-      - 'src/**'
-      - 'common/**'
-      - 'tools/**'
+  schedule:
+    # nightly rebuild at 00:00 UTC (~01:00-02:00 Paris)
+    - cron: '0 0 * * *'
 
 env:
   IMAGE: docker.io/higaetan/strix-halo-llamacpp-toolbox
