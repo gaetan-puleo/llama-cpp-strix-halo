@@ -9,6 +9,7 @@
 .DS_Store
 
 build*/
+profile-*/
 
 tools/ui/node_modules/
 
