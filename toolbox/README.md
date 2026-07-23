@@ -109,14 +109,22 @@ toolbox create llama-rocm-strixhalo -i localhost/llama-rocm-strixhalo -- \
   --group-add sudo --security-opt seccomp=unconfined
 ```
 
-ROCm comes from the TheRock nightly tarballs for `gfx1151` (the "7.14" alpha
-line); by default the build picks the latest. Pin a specific one with a build
-arg (the tarball key from `therock-nightly-tarball.s3.amazonaws.com`):
+ROCm 7.14 is taken from the proven local toolchain image (the same one the
+working `rocm-7.14` toolbox is built on), defaulting to
+`localhost/llama-rocm-7.14-build:7.14.0a20260612`. This is deliberate: the
+matching TheRock nightly on `repo.amd.com/rocm/tarball/` gets pruned over time,
+and the generic S3 nightly ships an HSA runtime that segfaults in
+`GpuAgent::InitDma()` on gfx1151. Point at a different toolchain image with:
 
 ```sh
 podman build --no-cache -t llama-rocm-strixhalo -f .devops/strix-halo.Dockerfile . \
-  --build-arg ROCM_TARBALL=therock-dist-linux-gfx1151-7.14.0a20260612.tar.gz
+  --build-arg ROCM_BUILD_IMAGE=localhost/llama-rocm-7.14-build:7.14.0a20260612
 ```
+
+> The toolchain image must contain a working ROCm 7.14 at `/opt/rocm` plus
+> `cmake`/`hipcc`. If you do not have it, build it from the TheRock gfx1151
+> tarball (see `repo.amd.com/rocm/tarball/therock-dist-linux-gfx1151-<ver>`)
+> while that version is still published.
 
 ## Publishing
 
