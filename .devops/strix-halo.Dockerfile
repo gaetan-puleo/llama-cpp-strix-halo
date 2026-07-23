@@ -35,8 +35,20 @@ RUN mkdir -p /usr/local/lib64 \
     && find /opt/llama.cpp/build -type f -name 'lib*.so*' -exec cp {} /usr/local/lib64/ \; \
     && ldconfig
 
-# Resolve the real ROCm dir (the image exposes it via the /opt/rocm symlink).
-RUN cp -a "$(readlink -f /opt/rocm)" /opt/rocm-dist
+# Resolve the real ROCm dir (the image exposes it via the /opt/rocm symlink) and
+# slim it to what llama.cpp actually loads at runtime: hip/hsa, rocblas/hipblas/
+# hipblaslt/rocsolver/rocroller, amd_comgr + libLLVM/libclang-cpp, and the bundled
+# rocm_sysdeps. Drop compilers (bin), static libs, docs/tests, and unused
+# libraries (MIOpen, RCCL, rocFFT/rocSPARSE/rocRAND). Keeps a single ~4 GB layer.
+RUN cp -a "$(readlink -f /opt/rocm)" /opt/rocm-dist \
+    && cd /opt/rocm-dist \
+    && rm -rf bin include share clients tests libhipcxx libexec lib/rdc lib/host-math \
+    && rm -rf lib/llvm/bin lib/llvm/include lib/llvm/share \
+    && find . -name '*.a' -delete \
+    && rm -f lib/libMIOpen*.so* lib/librccl*.so* lib/librocfft*.so* \
+             lib/librocsparse*.so* lib/librocrand*.so* lib/librocalution*.so* \
+             lib/librocprof-sys*.so* lib/librocjitsu*.so* \
+             lib/llvm/lib/libMLIR*.so* lib/llvm/lib/libclang.so*
 
 # ---------------------------------------------------------------------------
 # runtime stage
