@@ -157,10 +157,19 @@ To publish to Docker Hub instead, set the `DOCKERHUB_USERNAME` and
 
 - **[Nathanw1014/llama.cpp `strix-halo-fa-fixes`](https://github.com/Nathanw1014/llama.cpp/tree/strix-halo-fa-fixes)**
   (Nathan Wilson) - the quantized-KV Flash Attention TILE path in this fork **is
-  his code**, incorporated near-verbatim: dequantizing the KV cache on load inside
-  the tile FA kernel for quantized decode, plus the head-128/256 and gqa-ratio-8
-  quantized-KV tests and the Strix Halo benchmarks. Full credit and authorship for
-  that path belong to him; this fork only adds minor edits around it.
+  his code**, not a reimplementation. It was taken near-verbatim from his commit
+  `2a24abc63` ("CUDA: dequantize KV on load in the tile FA kernel, use it for
+  quantized decode"): dequantizing the KV cache on load inside the tile FA kernel
+  for quantized decode, plus the head-128/256 and gqa-ratio-8 quantized-KV tests
+  and the Strix Halo benchmarks.
+
+  To attribute this properly in the git history, his original code and its
+  explanatory comments were restored in a dedicated commit **authored in his
+  name** (`ggml-cuda: restore original comments for quantized-KV FA tile`,
+  author: Nathan Wilson). The only edit this fork makes to that path is a
+  one-line `if` -> `if constexpr` guard needed for the D64 `J=0` instantiation;
+  everything else in the TILE dequant path is his. Full credit and authorship for
+  it belong to him.
 - **[kyuz0/amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes)**
   - the packaging approach here (multi-stage Fedora + ROCm Dockerfile, refresh
   script, CI matrix, and the host kernel parameters) is modeled on that project.
