@@ -39,7 +39,7 @@ carries the Strix-Halo-specific kernel work assembled in this fork:
 ```sh
 # Fedora (toolbox). Ubuntu/Debian users: use `distrobox` instead of `toolbox`.
 toolbox create llama-rocm-strixhalo \
-  --image docker.io/higaetan/strix-halo-toolbox:rocm-7.14 \
+  --image docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14 \
   -- --device /dev/dri --device /dev/kfd --group-add video --group-add render \
      --group-add sudo --security-opt seccomp=unconfined
 
@@ -136,8 +136,8 @@ Build the image locally (see above), then push it to Docker Hub by hand:
 podman login docker.io -u higaetan
 
 # tag and push
-podman tag llama-rocm-strixhalo docker.io/higaetan/strix-halo-toolbox:rocm-7.14
-podman push docker.io/higaetan/strix-halo-toolbox:rocm-7.14
+podman tag llama-rocm-strixhalo docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14
+podman push docker.io/higaetan/strix-halo-llamacpp-toolbox:rocm-7.14
 ```
 
 The repository is created automatically on first push; set it public under
