@@ -20,8 +20,8 @@ on:
         required: false
         default: "7.14.0"
   schedule:
-    # nightly rebuild at 00:00 UTC (~01:00-02:00 Paris)
-    - cron: '0 0 * * *'
+    # nightly rebuild at 02:00 UTC (~03:00-04:00 Paris)
+    - cron: '0 2 * * *'
 
 env:
   IMAGE: docker.io/higaetan/strix-halo-llamacpp-toolbox
