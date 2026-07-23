@@ -22,9 +22,6 @@ kernel work for RDNA 3.5:
 - Tiled transposed concat
 - Adaptive Gated Delta Net
 
-Validated on Strix Halo (Laguna-S 2.1 Q4_K_XL, 69 GiB, full GPU offload):
-prompt ~81 t/s, generation ~25 t/s.
-
 ## Quick start
 
 Pull the published image and create the container. Works with both `toolbox`
