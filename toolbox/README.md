@@ -74,22 +74,22 @@ Or use the helper (auto-detects toolbox vs distrobox, or force with `RUNNER=`):
 
 ## Running Inference
 
-> IMPORTANT: on Strix Halo always enable flash attention (`-fa 1`). For models
-> that take a large fraction of RAM, add `--direct-io` (or `--no-mmap`). The
-> default mmap path keeps the GGUF file resident AND allocates the same bytes
-> again as GTT, so a ~69 GiB model needs ~138 GiB and thrashes unified memory.
-> `--direct-io` streams weights through pinned buffers and loads in seconds.
+> IMPORTANT: on Strix Halo always enable flash attention (`-fa 1`) and disable
+> mmap (`--no-mmap`). The default mmap path keeps the GGUF file resident AND
+> allocates the same bytes again as GTT, so a ~69 GiB model needs ~138 GiB and
+> thrashes unified memory. `--no-mmap` reads the weights straight into the GTT
+> buffers instead, keeping resident memory low.
 
 Server (OpenAI-compatible API):
 
 ```sh
-llama-server -m model.gguf -c 8192 -ngl 999 -fa 1 --direct-io
+llama-server -m model.gguf -c 8192 -ngl 999 -fa 1 --no-mmap
 ```
 
 CLI:
 
 ```sh
-llama-cli -m model.gguf -ngl 999 -fa 1 --direct-io -p "Write a Strix Halo haiku."
+llama-cli -m model.gguf -ngl 999 -fa 1 --no-mmap -p "Write a Strix Halo haiku."
 ```
 
 ## Host Configuration
@@ -175,7 +175,7 @@ Docker Hub -> the repo -> Settings -> Make public.
 - **Toolbox cannot see the GPU** - confirm `/dev/dri` and `/dev/kfd` are passed
   and your user is in the `video` and `render` groups.
 - **Large model hangs on load / RAM spikes** - you are on the mmap path; add
-  `--direct-io`. See [Running Inference](#running-inference).
+  `--no-mmap`. See [Running Inference](#running-inference).
 - **Build runs out of memory** - HIP compilation is heavy; give the builder more
   RAM/swap or lower the parallel job count.
 - **`podman push` denied on Docker Hub** - run `podman login docker.io` with an
