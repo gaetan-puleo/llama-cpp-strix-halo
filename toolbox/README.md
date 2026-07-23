@@ -39,7 +39,7 @@ carries the Strix-Halo-specific kernel work assembled in this fork:
 ```sh
 # Fedora (toolbox). Ubuntu/Debian users: use `distrobox` instead of `toolbox`.
 toolbox create llama-rocm-strixhalo \
-  --image ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.2.4 \
+  --image ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14 \
   -- --device /dev/dri --device /dev/kfd --group-add video --group-add render \
      --group-add sudo --security-opt seccomp=unconfined
 
@@ -109,11 +109,13 @@ toolbox create llama-rocm-strixhalo -i localhost/llama-rocm-strixhalo -- \
   --group-add sudo --security-opt seccomp=unconfined
 ```
 
-Point at a different ROCm repository (for example a newer ROCm) with a build arg:
+ROCm comes from the TheRock nightly tarballs for `gfx1151` (the "7.14" alpha
+line); by default the build picks the latest. Pin a specific one with a build
+arg (the tarball key from `therock-nightly-tarball.s3.amazonaws.com`):
 
 ```sh
 podman build --no-cache -t llama-rocm-strixhalo -f .devops/strix-halo.Dockerfile . \
-  --build-arg ROCM_BASEURL=https://repo.radeon.com/rocm/rhel10/7.2.4/main
+  --build-arg ROCM_TARBALL=therock-dist-linux-gfx1151-7.14.0a20260612.tar.gz
 ```
 
 ## Publishing
@@ -126,8 +128,8 @@ with GitHub Container Registry (`ghcr.io`):
 echo "$GHCR_TOKEN" | podman login ghcr.io -u gaetan-puleo --password-stdin
 
 # tag and push (image name must be lowercase)
-podman tag llama-rocm-strixhalo ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.2.4
-podman push ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.2.4
+podman tag llama-rocm-strixhalo ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14
+podman push ghcr.io/gaetan-puleo/llama-cpp-strix-halo:rocm-7.14
 ```
 
 New GHCR packages are private by default; make it public once under
