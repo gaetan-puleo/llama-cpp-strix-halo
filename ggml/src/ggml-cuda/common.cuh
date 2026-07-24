@@ -1515,6 +1515,56 @@ struct ggml_backend_cuda_context {
     ggml_cuda_pool & pool() {
         return pool(device);
     }
+
+    struct mmvq_q8_1_cache_entry {
+        ggml_type type;
+        size_t size;
+        std::unique_ptr<ggml_cuda_pool_alloc<char>> data;
+    };
+
+    // Reuse quantized activations only within one graph execution.
+    std::unordered_map<const ggml_tensor *, mmvq_q8_1_cache_entry> mmvq_q8_1_cache[GGML_CUDA_MAX_STREAMS];
+    bool mmvq_q8_1_cache_active = false;
+
+    void mmvq_q8_1_cache_begin() {
+        GGML_ASSERT(!mmvq_q8_1_cache_active);
+        mmvq_q8_1_cache_active = true;
+    }
+
+    char * mmvq_q8_1_cache_get(const ggml_tensor * src, ggml_type type, size_t size, bool & created) {
+        if (!mmvq_q8_1_cache_active) {
+            return nullptr;
+        }
+
+        auto & cache = mmvq_q8_1_cache[curr_stream_no];
+        auto it = cache.find(src);
+        if (it != cache.end()) {
+            if (it->second.type != type || it->second.size != size) {
+                return nullptr;
+            }
+            created = false;
+            return it->second.data->get();
+        }
+
+        static constexpr size_t max_entries = 16;
+        if (cache.size() == max_entries) {
+            cache.clear();
+        }
+
+        auto data = std::make_unique<ggml_cuda_pool_alloc<char>>(pool(), size);
+        char * ptr = data->get();
+        cache.emplace(src, mmvq_q8_1_cache_entry{type, size, std::move(data)});
+        created = true;
+        return ptr;
+    }
+
+    void mmvq_q8_1_cache_end() {
+        GGML_ASSERT(mmvq_q8_1_cache_active);
+        mmvq_q8_1_cache_active = false;
+        for (auto & cache : mmvq_q8_1_cache) {
+            cache.clear();
+        }
+    }
 };
 
 struct ggml_cuda_mm_fusion_args_host {
@@ -1658,4 +1708,3 @@ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_ke
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
     CUDA_CHECK(cudaGetLastError());
 }
-

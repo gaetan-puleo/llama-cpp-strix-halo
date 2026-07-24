@@ -4,6 +4,7 @@
 #include "mmid.cuh"
 
 #include <cstdint>
+#include <cstdlib>
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
@@ -76,12 +77,59 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
     }
 }
 
-static void ggml_cuda_mul_mat_q_id(
+static bool ggml_cuda_mul_mat_q_pair_switch_type(
+        ggml_backend_cuda_context & ctx, const mmq_args & args0, const mmq_args & args1,
+        const ggml_cuda_mm_fusion_args_device fusion, const int64_t stride_bias0, const int64_t stride_bias1,
+        cudaStream_t stream) {
+    static const bool disable_pair_kernel = [] {
+        const char * value = std::getenv("GGML_CUDA_DISABLE_MMQ_PAIR_KERNEL");
+        return value && std::atoi(value) != 0;
+    }();
+    if (disable_pair_kernel) {
+        return false;
+    }
+
+    if (args0.type_x != args1.type_x) {
+        return false;
+    }
+
+#define CASE_MMQ_PAIR(type) case type: return mul_mat_q_pair_case<type>(ctx, args0, args1, fusion, stride_bias0, stride_bias1, stream)
+    switch (args0.type_x) {
+        CASE_MMQ_PAIR(GGML_TYPE_Q1_0);
+        CASE_MMQ_PAIR(GGML_TYPE_Q4_0);
+        CASE_MMQ_PAIR(GGML_TYPE_Q4_1);
+        CASE_MMQ_PAIR(GGML_TYPE_Q5_0);
+        CASE_MMQ_PAIR(GGML_TYPE_Q5_1);
+        CASE_MMQ_PAIR(GGML_TYPE_Q8_0);
+        CASE_MMQ_PAIR(GGML_TYPE_MXFP4);
+        CASE_MMQ_PAIR(GGML_TYPE_NVFP4);
+        CASE_MMQ_PAIR(GGML_TYPE_Q2_K);
+        CASE_MMQ_PAIR(GGML_TYPE_Q3_K);
+        CASE_MMQ_PAIR(GGML_TYPE_Q4_K);
+        CASE_MMQ_PAIR(GGML_TYPE_Q5_K);
+        CASE_MMQ_PAIR(GGML_TYPE_Q6_K);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ2_XXS);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ2_XS);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ2_S);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ3_XXS);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ3_S);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ1_S);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ4_XS);
+        CASE_MMQ_PAIR(GGML_TYPE_IQ4_NL);
+        default: return false;
+    }
+#undef CASE_MMQ_PAIR
+}
+
+static bool ggml_cuda_mul_mat_q_id(
         ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, const ggml_tensor * src1,
-        const ggml_tensor * ids, ggml_tensor * const * dsts, int n_mats) {
+        const ggml_tensor * ids, ggml_tensor * const * dsts, int n_mats,
+        const ggml_cuda_mm_fusion_args_host * fusion = nullptr, ggml_tensor * fused_dst = nullptr) {
     GGML_ASSERT(n_mats == 1 || n_mats == 2);
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(ids->type == GGML_TYPE_I32);
+    GGML_ASSERT((fusion == nullptr) == (fused_dst == nullptr));
+    GGML_ASSERT(!fusion || n_mats == 2);
 
     const ggml_tensor * src0 = src0s[0];
     ggml_tensor * dst = dsts[0];
@@ -93,6 +141,7 @@ static void ggml_cuda_mul_mat_q_id(
     GGML_ASSERT(src1->nb[2] % src1->nb[1] == 0);
     GGML_ASSERT(dst->nb[2] % dst->nb[1] == 0);
     GGML_ASSERT(ids->nb[0] == ggml_element_size(ids));
+    GGML_ASSERT(!fused_dst || (fused_dst->type == GGML_TYPE_F32 && ggml_are_same_shape(dst, fused_dst)));
 
     const int64_t n_expert_used = ids->ne[0];
     const int64_t n_tokens = src1->ne[2];
@@ -166,26 +215,73 @@ static void ggml_cuda_mul_mat_q_id(
         src1->ne[1] * ne10_padded * sizeof(block_fp4_mmq) / (QK_FP4_MMQ * sizeof(int)) :
         src1->ne[1] * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
     const int64_t s13_q = n_tokens*s12_q;
+    ggml_cuda_mm_fusion_args_device fusion_local{};
+    int64_t stride_bias0 = 0;
+    int64_t stride_bias1 = 0;
+    if (fusion) {
+        GGML_ASSERT(fusion->gate && fusion->gate->type == src0s[1]->type);
+        GGML_ASSERT((fusion->x_scale == nullptr && fusion->gate_scale == nullptr) || src0->type == GGML_TYPE_NVFP4);
+        fusion_local.gate = fusion->gate->data;
+        fusion_local.glu_op = fusion->glu_op;
+
+        if (fusion->x_bias) {
+            GGML_ASSERT(fusion->x_bias->type == GGML_TYPE_F32 && fusion->x_bias->ne[0] == fused_dst->ne[0]);
+            GGML_ASSERT(fusion->x_bias->ne[1] == src0->ne[2]);
+            fusion_local.x_bias = fusion->x_bias->data;
+            stride_bias0 = fusion->x_bias->nb[1] / sizeof(float);
+        }
+        if (fusion->gate_bias) {
+            GGML_ASSERT(fusion->gate_bias->type == GGML_TYPE_F32 && fusion->gate_bias->ne[0] == fused_dst->ne[0]);
+            GGML_ASSERT(fusion->gate_bias->ne[1] == src0->ne[2]);
+            fusion_local.gate_bias = fusion->gate_bias->data;
+            stride_bias1 = fusion->gate_bias->nb[1] / sizeof(float);
+        }
+        if (fusion->x_scale) {
+            GGML_ASSERT(fusion->x_scale->type == GGML_TYPE_F32 && ggml_is_contiguous(fusion->x_scale));
+            GGML_ASSERT(ggml_nelements(fusion->x_scale) == src0->ne[2]);
+            fusion_local.x_scale = fusion->x_scale->data;
+        }
+        if (fusion->gate_scale) {
+            GGML_ASSERT(fusion->gate_scale->type == GGML_TYPE_F32 && ggml_is_contiguous(fusion->gate_scale));
+            GGML_ASSERT(ggml_nelements(fusion->gate_scale) == src0->ne[2]);
+            fusion_local.gate_scale = fusion->gate_scale->data;
+        }
+    }
+
+    mmq_args args[2];
     for (int i = 0; i < n_mats; ++i) {
         const ggml_tensor * src0_i = src0s[i];
         ggml_tensor * dst_i = dsts[i];
+        ggml_tensor * dst_out = fusion && i == 0 ? fused_dst : dst_i;
         const size_t ts_src0 = ggml_type_size(src0_i->type);
-        const size_t ts_dst = ggml_type_size(dst_i->type);
+        const size_t ts_dst = ggml_type_size(dst_out->type);
         const int64_t s01 = src0_i->nb[1] / ts_src0;
         const int64_t s02 = src0_i->nb[2] / ts_src0;
         const int64_t s03 = src0_i->nb[3] / ts_src0;
-        const int64_t s1 = dst_i->nb[1] / ts_dst;
-        const int64_t s2 = dst_i->nb[2] / ts_dst;
-        const int64_t s3 = dst_i->nb[3] / ts_dst;
-        const mmq_args args = {
-            (const char *) src0_i->data, src0_i->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), (float *) dst_i->data,
+        const int64_t s1 = dst_out->nb[1] / ts_dst;
+        const int64_t s2 = dst_out->nb[2] / ts_dst;
+        const int64_t s3 = dst_out->nb[3] / ts_dst;
+        args[i] = {
+            (const char *) src0_i->data, src0_i->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), (float *) dst_out->data,
             src1_scale.ptr,
             src0_i->ne[0], src0_i->ne[1], ne_get_rows, s01, ne_get_rows, s1,
             src0_i->ne[2], src0_i->ne[2], s02, s12_q, s2,
             src0_i->ne[3], src1->ne[3], s03, s13_q, s3,
             n_tokens};
-        ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
     }
+
+    if (n_mats == 2 && ggml_cuda_mul_mat_q_pair_switch_type(
+            ctx, args[0], args[1], fusion_local, stride_bias0, stride_bias1, stream)) {
+        return true;
+    }
+    if (fusion) {
+        return false;
+    }
+
+    for (int i = 0; i < n_mats; ++i) {
+        ggml_cuda_mul_mat_q_switch_type(ctx, args[i], stream);
+    }
+    return true;
 }
 
 void ggml_cuda_mul_mat_q(
@@ -293,6 +389,18 @@ void ggml_cuda_mul_mat_q_pair(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const ggml_tensor * src0s[] = { dst0->src[0], dst1->src[0] };
     ggml_tensor * dsts[] = { dst0, dst1 };
     ggml_cuda_mul_mat_q_id(ctx, src0s, dst0->src[1], dst0->src[2], dsts, 2);
+}
+
+bool ggml_cuda_mul_mat_q_fused(
+        ggml_backend_cuda_context & ctx, ggml_tensor * up, ggml_tensor * gate, ggml_tensor * dst,
+        const ggml_cuda_mm_fusion_args_host & fusion) {
+    GGML_ASSERT(up->src[1] == gate->src[1]);
+    GGML_ASSERT(up->src[2] == gate->src[2]);
+    GGML_ASSERT(fusion.gate == gate->src[0]);
+
+    const ggml_tensor * src0s[] = {up->src[0], gate->src[0]};
+    ggml_tensor * dsts[] = {up, gate};
+    return ggml_cuda_mul_mat_q_id(ctx, src0s, up->src[1], up->src[2], dsts, 2, &fusion, dst);
 }
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
