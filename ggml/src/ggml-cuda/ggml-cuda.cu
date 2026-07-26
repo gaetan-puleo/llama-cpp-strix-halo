@@ -703,6 +703,11 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     std::unique_lock<std::mutex> lock(ggml_cuda_lock);
     ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
 
+#ifdef USE_CUDA_GRAPH
+    // Graph-owned pool allocations must be released before the pools.
+    cuda_graphs.clear();
+#endif
+
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
@@ -2978,7 +2983,10 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
         }
     }
 
-    if (!ggml_can_fuse(cgraph, node_idx, ops)) {
+    const bool unary_mul = ops.size() >= 2 && ops.size() <= 3 && ops.begin()[0] == GGML_OP_UNARY &&
+        *(ops.end() - 1) == GGML_OP_MUL && (ops.size() == 2 || ops.begin()[1] == GGML_OP_RESHAPE) &&
+        ggml_can_fuse_subgraph(cgraph, node_idx, ops, { node_idx + (int) ops.size() - 1 });
+    if (!unary_mul && !ggml_can_fuse(cgraph, node_idx, ops)) {
         return false;
     }
 
@@ -3064,10 +3072,15 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
         return true;
     }
 
-    if (ops.size() == 2 && ops.begin()[0] == GGML_OP_UNARY && ops.begin()[1] == GGML_OP_MUL
+    if ((ops.size() == 2 || ops.size() == 3) && ops.begin()[0] == GGML_OP_UNARY && *(ops.end() - 1) == GGML_OP_MUL
      && unary_ops.size() == 1 && (unary_ops.begin()[0] == GGML_UNARY_OP_SILU || unary_ops.begin()[0] == GGML_UNARY_OP_SIGMOID || unary_ops.begin()[0] == GGML_UNARY_OP_SOFTPLUS)) {
         const ggml_tensor * unary = cgraph->nodes[node_idx];
-        const ggml_tensor * mul   = cgraph->nodes[node_idx+1];
+        const ggml_tensor * unary_out = ops.size() == 3 ? cgraph->nodes[node_idx + 1] : unary;
+        const ggml_tensor * mul   = cgraph->nodes[node_idx + ops.size() - 1];
+
+        if (ops.size() == 3 && (ops.begin()[1] != GGML_OP_RESHAPE || unary_out->src[0] != unary)) {
+            return false;
+        }
 
         if (ggml_get_unary_op(unary) != unary_ops.begin()[0]) {
             return false;
@@ -3081,11 +3094,21 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
             return false;
         }
 
-        const ggml_tensor * other = (mul->src[0] == unary) ? mul->src[1] : mul->src[0];
+        const ggml_tensor * other = (mul->src[0] == unary_out) ? mul->src[1] : mul->src[0];
+        if (mul->src[0] != unary_out && mul->src[1] != unary_out) {
+            return false;
+        }
         if (other->type != unary->type) {
             return false;
         }
-        if (!ggml_is_contiguous_1(other) || !ggml_is_contiguous_1(unary->src[0]) || !ggml_are_same_shape(other, unary)) {
+        const bool broadcast_dim0 = unary_out->ne[0] == 1 && other->ne[0] == mul->ne[0] &&
+            unary_out->ne[1] == other->ne[1] && unary_out->ne[2] == other->ne[2] && unary_out->ne[3] == other->ne[3] &&
+            ggml_nelements(unary->src[0]) == ggml_nrows(other);
+        if (broadcast_dim0 && unary->type != GGML_TYPE_F32) {
+            return false;
+        }
+        if (!ggml_is_contiguous(other) || !ggml_is_contiguous(unary->src[0]) ||
+                (!ggml_are_same_shape(other, unary) && !broadcast_dim0)) {
             return false;
         }
 
@@ -3895,6 +3918,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return 1;
     }
 
+    if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_RESHAPE, GGML_OP_MUL }, { GGML_UNARY_OP_SOFTPLUS })) {
+        ggml_cuda_op_unary_mul(*cuda_ctx, node, cgraph->nodes[i + 2]);
+        return 2;
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_SQR }, { GGML_UNARY_OP_RELU })) {
         ggml_cuda_op_relu_sqr(*cuda_ctx, node, cgraph->nodes[i + 1]);
         return 1;
@@ -4006,10 +4034,16 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 stream_ctx.concurrent_events.clear();
             }
 
-            const bool use_mmvq_q8_1_cache = !use_cuda_graph &&
-                GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[cuda_ctx->device].cc);
+            const bool use_mmvq_q8_1_cache = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[cuda_ctx->device].cc);
             if (use_mmvq_q8_1_cache) {
-                cuda_ctx->mmvq_q8_1_cache_begin();
+                ggml_cuda_graph * cache_graph = nullptr;
+#ifdef USE_CUDA_GRAPH
+                cache_graph = use_cuda_graph ? cuda_ctx->cuda_graph(graph_key) : nullptr;
+#else
+                GGML_UNUSED(use_cuda_graph);
+                GGML_UNUSED(graph_key);
+#endif
+                cuda_ctx->mmvq_q8_1_cache_begin(cache_graph);
             }
 
             for (int i = 0; i < cgraph->n_nodes; i++) {

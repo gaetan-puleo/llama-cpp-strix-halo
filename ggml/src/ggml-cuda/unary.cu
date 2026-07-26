@@ -283,6 +283,26 @@ static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k,
     ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n, o0, o1);
 }
 
+template <float (*op)(float), typename T>
+static __global__ void unary_broadcast_gated_op_kernel(const T * x, const T * g, T * dst, const int64_t k, const int64_t n) {
+    ggml_cuda_pdl_lc();
+    const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
+
+    if (i >= k) {
+        return;
+    }
+
+    ggml_cuda_pdl_sync();
+    dst[i] = (T)(op((float)x[i/n]) * (float)g[i]);
+}
+
+template <float (*op)(float), typename T>
+static void unary_broadcast_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, cudaStream_t stream) {
+    const int64_t num_blocks = (k + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+    const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3)num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
+    ggml_cuda_kernel_launch(unary_broadcast_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n);
+}
+
 template <float (*op)(float)>
 void ggml_cuda_op_unary_gated(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
@@ -581,13 +601,19 @@ static void ggml_cuda_op_unary_mul_impl(ggml_backend_cuda_context & ctx, ggml_te
     // Output goes to mul_node->data
 
     const ggml_tensor * unary_src = unary_node->src[0];  // input to the unary op
-    const ggml_tensor * other_src = (mul_node->src[0] == unary_node) ? mul_node->src[1] : mul_node->src[0];
+    const bool direct_unary = mul_node->src[0] == unary_node || mul_node->src[1] == unary_node;
+    const ggml_tensor * unary_out = direct_unary ? unary_node :
+        (mul_node->src[0]->src[0] == unary_node ? mul_node->src[0] : mul_node->src[1]);
+    const ggml_tensor * other_src = (mul_node->src[0] == unary_out) ? mul_node->src[1] : mul_node->src[0];
 
     GGML_ASSERT(ggml_is_contiguous_1(unary_src));
     GGML_ASSERT(unary_src->nb[0] == ggml_element_size(unary_src));
     GGML_ASSERT(ggml_is_contiguous_1(other_src));
     GGML_ASSERT(other_src->nb[0] == ggml_element_size(other_src));
-    GGML_ASSERT(ggml_are_same_shape(unary_src, other_src));
+    const bool broadcast_dim0 = unary_out->ne[0] == 1 && other_src->ne[0] == mul_node->ne[0] &&
+        unary_out->ne[1] == other_src->ne[1] && unary_out->ne[2] == other_src->ne[2] && unary_out->ne[3] == other_src->ne[3] &&
+        ggml_nelements(unary_src) == ggml_nrows(other_src);
+    GGML_ASSERT(ggml_are_same_shape(unary_src, other_src) || broadcast_dim0);
 
     GGML_ASSERT(unary_src->type == GGML_TYPE_F32 || unary_src->type == GGML_TYPE_F16);
     GGML_ASSERT(unary_src->type == other_src->type);
@@ -601,13 +627,23 @@ static void ggml_cuda_op_unary_mul_impl(ggml_backend_cuda_context & ctx, ggml_te
     const int64_t other_stride = other_src->nb[1];
 
     if (unary_src->type == GGML_TYPE_F16) {
-        unary_gated_cuda<op>((const half *) unary_src->data, (const half *) other_src->data,
-                             (half *) mul_node->data, k, nc,
-                             unary_stride / sizeof(half), other_stride / sizeof(half), stream);
+        if (broadcast_dim0) {
+            unary_broadcast_gated_cuda<op>((const half *) unary_src->data, (const half *) other_src->data,
+                                           (half *) mul_node->data, k, other_src->ne[0], stream);
+        } else {
+            unary_gated_cuda<op>((const half *) unary_src->data, (const half *) other_src->data,
+                                 (half *) mul_node->data, k, nc,
+                                 unary_stride / sizeof(half), other_stride / sizeof(half), stream);
+        }
     } else {
-        unary_gated_cuda<op>((const float *) unary_src->data, (const float *) other_src->data,
-                             (float *) mul_node->data, k, nc,
-                             unary_stride / sizeof(float), other_stride / sizeof(float), stream);
+        if (broadcast_dim0) {
+            unary_broadcast_gated_cuda<op>((const float *) unary_src->data, (const float *) other_src->data,
+                                           (float *) mul_node->data, k, other_src->ne[0], stream);
+        } else {
+            unary_gated_cuda<op>((const float *) unary_src->data, (const float *) other_src->data,
+                                 (float *) mul_node->data, k, nc,
+                                 unary_stride / sizeof(float), other_stride / sizeof(float), stream);
+        }
     }
 }
 
