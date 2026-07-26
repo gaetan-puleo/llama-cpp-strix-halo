@@ -232,37 +232,36 @@ static __global__ void mul_mat_vec_f(
 #endif // FP16_AVAILABLE
         }
     } else if constexpr (std::is_same_v<T, nv_bfloat16>) {
-//TODO: add support for ggml_cuda_mad for hip_bfloat162
 #if defined(GGML_USE_HIP)
-        const int * x2 = (const int *) x;
-        const int * gate_x2 = nullptr;
+        const uint32_t * x2 = (const uint32_t *) x;
+        const uint32_t * gate_x2 = nullptr;
         if constexpr (has_fusion) {
             if (use_gate) {
-                gate_x2 = (const int *) gate_x;
+                gate_x2 = (const uint32_t *) gate_x;
             }
         }
         for (int col2 = tid; col2 < ncols2; col2 += block_size) {
-            const int tmpx = x2[col2];
-            int tmpx_gate = 0;
+            const uint32_t tmpx = x2[col2];
+            uint32_t tmpx_gate = 0;
             if constexpr (has_fusion) {
                 if (use_gate) {
                     tmpx_gate = gate_x2[col2];
                 }
             }
+            const float2 tmpx_f = make_float2(
+                __uint_as_float(tmpx << 16), __uint_as_float(tmpx & 0xffff0000U));
 #pragma unroll
             for (int j = 0; j < ncols_dst; ++j) {
                 const float2 tmpy = y2[j*stride_col_y2 + col2];
-                const float tmpx0 = ggml_cuda_cast<float>(reinterpret_cast<const nv_bfloat16 *>(&tmpx)[0]);
-                const float tmpx1 = ggml_cuda_cast<float>(reinterpret_cast<const nv_bfloat16 *>(&tmpx)[1]);
-                ggml_cuda_mad(sumf[j], tmpx0, tmpy.x);
-                ggml_cuda_mad(sumf[j], tmpx1, tmpy.y);
+                ggml_cuda_mad(sumf[j], tmpx_f.x, tmpy.x);
+                ggml_cuda_mad(sumf[j], tmpx_f.y, tmpy.y);
 
                 if constexpr (has_fusion) {
                     if (use_gate) {
-                        const float tmpx0_gate = ggml_cuda_cast<float>(reinterpret_cast<const nv_bfloat16 *>(&tmpx_gate)[0]);
-                        const float tmpx1_gate = ggml_cuda_cast<float>(reinterpret_cast<const nv_bfloat16 *>(&tmpx_gate)[1]);
-                        ggml_cuda_mad(sumf_gate[j], tmpx0_gate, tmpy.x);
-                        ggml_cuda_mad(sumf_gate[j], tmpx1_gate, tmpy.y);
+                        const float2 tmpx_gate_f = make_float2(
+                            __uint_as_float(tmpx_gate << 16), __uint_as_float(tmpx_gate & 0xffff0000U));
+                        ggml_cuda_mad(sumf_gate[j], tmpx_gate_f.x, tmpy.x);
+                        ggml_cuda_mad(sumf_gate[j], tmpx_gate_f.y, tmpy.y);
                     }
                 }
             }
