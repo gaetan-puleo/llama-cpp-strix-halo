@@ -3688,6 +3688,46 @@ struct test_relu_sqr : public test_case {
     }
 };
 
+// GGML_OP_UNARY + optional GGML_OP_RESHAPE + GGML_OP_MUL (fused operation)
+struct test_unary_mul : public test_case {
+    const ggml_type type;
+    const ggml_unary_op op;
+    const int64_t head_dim;
+    const int64_t n_head;
+    const int64_t n_tokens;
+    const bool reshape;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "UNARY_MUL";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::string vars() override {
+        return VARS_TO_STR6(type, op, head_dim, n_head, n_tokens, reshape);
+    }
+
+    test_unary_mul(ggml_type type, ggml_unary_op op, int64_t head_dim, int64_t n_head, int64_t n_tokens, bool reshape)
+        : type(type), op(op), head_dim(head_dim), n_head(n_head), n_tokens(n_tokens), reshape(reshape) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * x = ggml_new_tensor_3d(ctx, type, head_dim, n_head, n_tokens);
+        ggml_tensor * gate = reshape ? ggml_new_tensor_2d(ctx, type, n_head, n_tokens) :
+            ggml_new_tensor_3d(ctx, type, 1, n_head, n_tokens);
+        ggml_set_name(x, "x");
+        ggml_set_name(gate, "gate");
+
+        gate = ggml_unary(ctx, gate, op);
+        if (reshape) {
+            gate = ggml_reshape_3d(ctx, gate, 1, n_head, n_tokens);
+        }
+        ggml_tensor * out = ggml_mul(ctx, x, gate);
+        ggml_set_name(out, "out");
+        return out;
+    }
+};
+
 // SNAKE activation fusion: y = x + sin(a*x)^2 * inv_b
 // CUDA backend matches the naive 5-op chain (mul, sin, sqr, mul, add)
 // and dispatches a single fused kernel.
@@ -8043,6 +8083,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
         test_cases.emplace_back(new test_relu_sqr(type, { 128, 2, 2, 2 }));
         test_cases.emplace_back(new test_relu_sqr(type, { 5, 7, 11, 13 }));
+        test_cases.emplace_back(new test_unary_mul(type, GGML_UNARY_OP_SOFTPLUS, 128, 48, 1, true));
+        test_cases.emplace_back(new test_unary_mul(type, GGML_UNARY_OP_SOFTPLUS, 17, 7, 3, true));
+        test_cases.emplace_back(new test_unary_mul(type, GGML_UNARY_OP_SIGMOID, 128, 48, 1, false));
+        test_cases.emplace_back(new test_unary_mul(type, GGML_UNARY_OP_SIGMOID, 17, 7, 3, false));
     }
 
     // SNAKE activation fusion: x + sin(a*x)^2 * inv_b
