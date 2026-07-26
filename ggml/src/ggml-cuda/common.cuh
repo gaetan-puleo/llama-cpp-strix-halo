@@ -1220,6 +1220,29 @@ struct ggml_tensor_extra_gpu {
 #define USE_CUDA_GRAPH
 #endif
 
+struct ggml_cuda_mmvq_q8_1_cache_key {
+    const ggml_tensor * src;
+    ggml_type type;
+    size_t size;
+
+    bool operator==(const ggml_cuda_mmvq_q8_1_cache_key & other) const {
+        return src == other.src && type == other.type && size == other.size;
+    }
+};
+
+struct ggml_cuda_mmvq_q8_1_cache_key_hash {
+    size_t operator()(const ggml_cuda_mmvq_q8_1_cache_key & key) const {
+        return std::hash<const ggml_tensor *>{}(key.src) ^ (size_t(key.type) << 1) ^ (key.size << 2);
+    }
+};
+
+struct ggml_cuda_mmvq_q8_1_cache_entry {
+    std::unique_ptr<ggml_cuda_pool_alloc<char>> data;
+};
+
+using ggml_cuda_mmvq_q8_1_cache = std::unordered_map<ggml_cuda_mmvq_q8_1_cache_key,
+    ggml_cuda_mmvq_q8_1_cache_entry, ggml_cuda_mmvq_q8_1_cache_key_hash>;
+
 struct ggml_cuda_graph {
 #ifdef USE_CUDA_GRAPH
     ~ggml_cuda_graph() {
@@ -1251,6 +1274,7 @@ struct ggml_cuda_graph {
         return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env);
     }
 #endif
+    ggml_cuda_mmvq_q8_1_cache mmvq_q8_1_cache[GGML_CUDA_MAX_STREAMS];
 };
 
 struct ggml_cuda_concurrent_event {
@@ -1516,19 +1540,15 @@ struct ggml_backend_cuda_context {
         return pool(device);
     }
 
-    struct mmvq_q8_1_cache_entry {
-        ggml_type type;
-        size_t size;
-        std::unique_ptr<ggml_cuda_pool_alloc<char>> data;
-    };
-
-    // Reuse quantized activations only within one graph execution.
-    std::unordered_map<const ggml_tensor *, mmvq_q8_1_cache_entry> mmvq_q8_1_cache[GGML_CUDA_MAX_STREAMS];
+    // Reuse quantized activations within a direct execution or captured graph.
+    ggml_cuda_mmvq_q8_1_cache mmvq_q8_1_cache[GGML_CUDA_MAX_STREAMS];
+    ggml_cuda_graph * mmvq_q8_1_cache_graph = nullptr;
     bool mmvq_q8_1_cache_active = false;
 
-    void mmvq_q8_1_cache_begin() {
+    void mmvq_q8_1_cache_begin(ggml_cuda_graph * graph = nullptr) {
         GGML_ASSERT(!mmvq_q8_1_cache_active);
         mmvq_q8_1_cache_active = true;
+        mmvq_q8_1_cache_graph = graph;
     }
 
     char * mmvq_q8_1_cache_get(const ggml_tensor * src, ggml_type type, size_t size, bool & created) {
@@ -1536,24 +1556,29 @@ struct ggml_backend_cuda_context {
             return nullptr;
         }
 
-        auto & cache = mmvq_q8_1_cache[curr_stream_no];
-        auto it = cache.find(src);
+        const ggml_tensor * cache_src = src;
+        while (cache_src->view_src && cache_src->view_src->data == src->data &&
+                ggml_are_same_shape(cache_src->view_src, src) && ggml_are_same_stride(cache_src->view_src, src)) {
+            cache_src = cache_src->view_src;
+        }
+
+        auto & cache = mmvq_q8_1_cache_graph ? mmvq_q8_1_cache_graph->mmvq_q8_1_cache[curr_stream_no] :
+            mmvq_q8_1_cache[curr_stream_no];
+        const ggml_cuda_mmvq_q8_1_cache_key key{cache_src, type, size};
+        auto it = cache.find(key);
         if (it != cache.end()) {
-            if (it->second.type != type || it->second.size != size) {
-                return nullptr;
-            }
             created = false;
             return it->second.data->get();
         }
 
         static constexpr size_t max_entries = 16;
-        if (cache.size() == max_entries) {
+        if (!mmvq_q8_1_cache_graph && cache.size() == max_entries) {
             cache.clear();
         }
 
         auto data = std::make_unique<ggml_cuda_pool_alloc<char>>(pool(), size);
         char * ptr = data->get();
-        cache.emplace(src, mmvq_q8_1_cache_entry{type, size, std::move(data)});
+        cache.emplace(key, ggml_cuda_mmvq_q8_1_cache_entry{std::move(data)});
         created = true;
         return ptr;
     }
@@ -1561,9 +1586,12 @@ struct ggml_backend_cuda_context {
     void mmvq_q8_1_cache_end() {
         GGML_ASSERT(mmvq_q8_1_cache_active);
         mmvq_q8_1_cache_active = false;
-        for (auto & cache : mmvq_q8_1_cache) {
-            cache.clear();
+        if (!mmvq_q8_1_cache_graph) {
+            for (auto & cache : mmvq_q8_1_cache) {
+                cache.clear();
+            }
         }
+        mmvq_q8_1_cache_graph = nullptr;
     }
 };
 
