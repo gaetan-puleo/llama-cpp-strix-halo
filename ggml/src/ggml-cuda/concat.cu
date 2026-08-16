@@ -195,7 +195,8 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
             dst->nb[0] == sizeof(T) && dst->nb[1] == dst->ne[0] * sizeof(T) &&
             src0->ne[1] == src1->ne[1] && src0->ne[2] == src1->ne[2]) {
         constexpr int tile = 32;
-        const dim3 block_dims(tile, 8, 1);
+        const int tile_y = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[ggml_cuda_get_device()].cc) ? 16 : 8;
+        const dim3 block_dims(tile, tile_y, 1);
         const dim3 block_nums((src1->ne[1] + tile - 1) / tile, (src1->ne[0] + tile - 1) / tile, src1->ne[2]);
         concat_transposed_src1_dim0<T><<<block_nums, block_dims, 0, stream>>>(
             (const char *) src0->data, (const char *) src1->data, (char *) dst->data,
