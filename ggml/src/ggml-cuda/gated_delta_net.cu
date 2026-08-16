@@ -1,10 +1,17 @@
 #include "gated_delta_net.cuh"
 #include "ggml-cuda/common.cuh"
 
+static constexpr int gated_delta_net_num_warps(int cc) {
+    return GGML_CUDA_CC_IS_RDNA3_5(cc) ? 16 : 4;
+}
+
+static_assert(gated_delta_net_num_warps(GGML_CUDA_CC_RDNA3_5) == 16);
+static_assert(gated_delta_net_num_warps(GGML_CUDA_CC_RDNA3) == 4);
+
 #if defined(RDNA3_5)
-static constexpr int gdn_num_warps = 16;
+static constexpr int gdn_num_warps = gated_delta_net_num_warps(GGML_CUDA_CC_RDNA3_5);
 #else
-static constexpr int gdn_num_warps = 4;
+static constexpr int gdn_num_warps = gated_delta_net_num_warps(GGML_CUDA_CC_RDNA3);
 #endif
 
 template <int S_v, bool KDA, bool keep_rs_t>
@@ -185,7 +192,7 @@ static void launch_gated_delta_net(
         float scale, int64_t state_slot_stride, int K, cudaStream_t stream) {
     //TODO: Add chunked kernel for even faster pre-fill
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
-    const int num_warps = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[ggml_cuda_get_device()].cc) ? 16 : 4;
+    const int num_warps = gated_delta_net_num_warps(ggml_cuda_info().devices[ggml_cuda_get_device()].cc);
     dim3      grid_dims(H, n_seqs, (S_v + num_warps - 1) / num_warps);
     dim3      block_dims(warp_size <= S_v ? warp_size : S_v, num_warps, 1);
 

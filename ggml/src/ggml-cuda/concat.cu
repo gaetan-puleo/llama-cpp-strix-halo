@@ -2,6 +2,13 @@
 
 #include <stdint.h>
 
+static constexpr int concat_transposed_tile_y(int cc) {
+    return GGML_CUDA_CC_IS_RDNA3_5(cc) ? 16 : 8;
+}
+
+static_assert(concat_transposed_tile_y(GGML_CUDA_CC_RDNA3_5) == 16);
+static_assert(concat_transposed_tile_y(GGML_CUDA_CC_RDNA3) == 8);
+
 // contiguous kernels
 template <typename T, int dim>
 static __global__ void __launch_bounds__(CUDA_CONCAT_BLOCK_SIZE) concat_cont(const T * x,
@@ -195,7 +202,7 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
             dst->nb[0] == sizeof(T) && dst->nb[1] == dst->ne[0] * sizeof(T) &&
             src0->ne[1] == src1->ne[1] && src0->ne[2] == src1->ne[2]) {
         constexpr int tile = 32;
-        const int tile_y = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[ggml_cuda_get_device()].cc) ? 16 : 8;
+        const int tile_y = concat_transposed_tile_y(ggml_cuda_info().devices[ggml_cuda_get_device()].cc);
         const dim3 block_dims(tile, tile_y, 1);
         const dim3 block_nums((src1->ne[1] + tile - 1) / tile, (src1->ne[0] + tile - 1) / tile, src1->ne[2]);
         concat_transposed_src1_dim0<T><<<block_nums, block_dims, 0, stream>>>(

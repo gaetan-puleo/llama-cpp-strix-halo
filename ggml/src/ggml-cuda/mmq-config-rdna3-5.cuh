@@ -288,3 +288,10 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
 
     return ggml_cuda_mmq_config(GGML_TYPE_COUNT, 256, 2, 128, 64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, 256, false, true);
 }
+
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_Q8_0, 128, false).nthreads == 128);
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_Q8_0, 128, false).I == 64);
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_Q8_0, 128, true).nthreads == 128);
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_Q8_0, 128, true).I == 64);
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_MXFP4, 128, true).nthreads == 128);
+static_assert(ggml_cuda_mmq_get_config_rdna3_5(GGML_TYPE_MXFP4, 128, true).I == 64);
