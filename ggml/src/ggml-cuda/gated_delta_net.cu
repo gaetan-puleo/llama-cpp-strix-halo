@@ -2,7 +2,7 @@
 #include "ggml-cuda/common.cuh"
 
 #if defined(RDNA3_5)
-static constexpr int gdn_num_warps = 8;
+static constexpr int gdn_num_warps = 16;
 #else
 static constexpr int gdn_num_warps = 4;
 #endif
@@ -185,7 +185,7 @@ static void launch_gated_delta_net(
         float scale, int64_t state_slot_stride, int K, cudaStream_t stream) {
     //TODO: Add chunked kernel for even faster pre-fill
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
-    const int num_warps = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[ggml_cuda_get_device()].cc) ? 8 : 4;
+    const int num_warps = GGML_CUDA_CC_IS_RDNA3_5(ggml_cuda_info().devices[ggml_cuda_get_device()].cc) ? 16 : 4;
     dim3      grid_dims(H, n_seqs, (S_v + num_warps - 1) / num_warps);
     dim3      block_dims(warp_size <= S_v ? warp_size : S_v, num_warps, 1);
 
