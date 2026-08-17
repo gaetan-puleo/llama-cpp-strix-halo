@@ -26,6 +26,42 @@ static __device__ __forceinline__ float op_div(const float a, const float b) {
     return a / b;
 }
 
+template <float (*bin_op)(const float, const float)>
+static __global__ void binary_contiguous_f32(const float * src0, const float * src1, float * dst, int64_t n) {
+    ggml_cuda_pdl_lc();
+    int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+    ggml_cuda_pdl_sync();
+    for (; i < n; i += stride) {
+        dst[i] = bin_op(src0[i], src1[i]);
+        if (n - i <= stride) {
+            break;
+        }
+    }
+}
+
+template <float (*bin_op)(const float, const float)>
+static bool try_binary_contiguous_f32(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
+        !ggml_are_same_shape(src0, src1) || !ggml_are_same_shape(src0, dst) ||
+        !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    const int threads = 256;
+    const int64_t n = ggml_nelements(dst);
+    if (n == 0) {
+        return true;
+    }
+    const int blocks = std::min<int64_t>((n - 1) / threads + 1, 65535);
+    const ggml_cuda_kernel_launch_params launch_params(blocks, threads, 0, ctx.stream());
+    ggml_cuda_kernel_launch(binary_contiguous_f32<bin_op>, launch_params,
+        (const float *) src0->data, (const float *) src1->data, (float *) dst->data, n);
+    return true;
+}
+
 template <float (*bin_op)(const float, const float),
           typename src0_t,
           typename src1_t,
@@ -435,6 +471,9 @@ void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_cuda_op_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (try_binary_contiguous_f32<op_add>(ctx, dst)) {
+        return;
+    }
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_add>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
@@ -443,6 +482,9 @@ void ggml_cuda_op_sub(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_cuda_op_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (try_binary_contiguous_f32<op_mul>(ctx, dst)) {
+        return;
+    }
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_mul>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
