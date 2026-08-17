@@ -3307,7 +3307,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             const bool bad_padding_clear = ggml_backend_buffer_get_usage(weights->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE &&
                 ggml_nbytes(weights) != ggml_backend_buffer_get_alloc_size(weights->buffer, weights) && weights->view_src;
 
-            const bool shape_ok = next->src[1] == node && gate->type == GGML_TYPE_F32 && up->type == GGML_TYPE_F32 &&
+            const bool target_shape = node->ne[0] == 512 && next->ne[0] == 2048 &&
+                (!has_ids || (gate->ne[1] == 8 && weights->ne[2] == 256));
+            const bool shape_ok = target_shape && next->src[1] == node && gate->type == GGML_TYPE_F32 && up->type == GGML_TYPE_F32 &&
                 node->type == GGML_TYPE_F32 && next->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_Q8_0 &&
                 ggml_are_same_shape(gate, up) && ggml_are_same_shape(gate, node) && gate->nb[0] == sizeof(float) && up->nb[0] == sizeof(float) &&
                 gate->ne[3] == 1 && (has_ids ? gate->ne[1] == ids->ne[0] && gate->ne[2] == ids->ne[1] : gate->ne[2] == 1);
@@ -3453,7 +3455,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
     }
 
-    if (node->op == GGML_OP_MUL && i + 2 < cgraph->n_nodes &&
+    if (node->op == GGML_OP_MUL && node->ne[0] == 2048 && i + 2 < cgraph->n_nodes &&
         ggml_can_fuse_subgraph(cgraph, i, { GGML_OP_MUL, GGML_OP_ADD, GGML_OP_ADD }, { i + 2 })) {
         ggml_tensor * add0 = cgraph->nodes[i + 1];
         ggml_tensor * add1 = cgraph->nodes[i + 2];
@@ -3486,7 +3488,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
     }
 
-    if (node->op == GGML_OP_MUL && node->type == GGML_TYPE_F32 && node->ne[3] == 1 && node->ne[1] >= 2 && node->ne[1] <= 8) {
+    if (node->op == GGML_OP_MUL && node->type == GGML_TYPE_F32 && node->ne[0] == 2048 &&
+        node->ne[3] == 1 && node->ne[1] == 8) {
         const int n_expert_used = node->ne[1];
         const int n_ops = 2 * n_expert_used;
         if (i + n_ops <= cgraph->n_nodes) {
@@ -3499,7 +3502,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 const ggml_tensor * experts = ggml_are_same_shape(node, node->src[0]) ? node->src[0] : node->src[1];
                 const ggml_tensor * weights = experts == node->src[0] ? node->src[1] : node->src[0];
                 ggml_tensor * output = cgraph->nodes[output_idx];
-                bool valid = experts->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_F32 &&
+                bool valid = experts->op == GGML_OP_MUL_MAT_ID && experts->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_F32 &&
                     experts->ne[0] == node->ne[0] && experts->ne[1] == n_expert_used && experts->ne[2] == node->ne[2] &&
                     experts->ne[3] == 1 && weights->ne[0] == 1 && weights->ne[1] == n_expert_used &&
                     weights->ne[2] == node->ne[2] && weights->ne[3] == 1 &&
