@@ -542,6 +542,60 @@ void ggml_cuda_op_fused_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst, 
     }
 }
 
+template <int n_expert_used>
+static __global__ void weighted_expert_sum_f32(
+        const float * experts, const float * weights, float * dst,
+        int64_t n_embd, int64_t n_tokens, int64_t experts_s1, int64_t experts_s2,
+        int64_t weights_s1, int64_t weights_s2) {
+    const int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= n_embd * n_tokens) {
+        return;
+    }
+
+    const int64_t token = index / n_embd;
+    const int64_t channel = index - token * n_embd;
+    // Keep MUL rounding separate from ADD to match the unfused graph.
+    volatile float product = experts[token * experts_s2 + channel] * weights[token * weights_s2];
+    float sum = product;
+#pragma unroll
+    for (int i = 1; i < n_expert_used; ++i) {
+        product = experts[token * experts_s2 + i * experts_s1 + channel] * weights[token * weights_s2 + i * weights_s1];
+        sum += product;
+    }
+    dst[index] = sum;
+}
+
+void ggml_cuda_op_weighted_expert_sum(ggml_backend_cuda_context & ctx, ggml_tensor * mul, ggml_tensor * dst, int n_expert_used) {
+    const ggml_tensor * experts = ggml_are_same_shape(mul, mul->src[0]) ? mul->src[0] : mul->src[1];
+    const ggml_tensor * weights = experts == mul->src[0] ? mul->src[1] : mul->src[0];
+    const int64_t n_embd = experts->ne[0];
+    const int64_t n_tokens = experts->ne[2];
+    const int threads = 256;
+    const int blocks = (n_embd * n_tokens + threads - 1) / threads;
+    const ggml_cuda_kernel_launch_params launch_params(blocks, threads, 0, ctx.stream());
+    // MUL output may alias experts, so stage until all expert reads finish.
+    ggml_cuda_pool_alloc<float> result(ctx.pool(), n_embd * n_tokens);
+
+#define launch_weighted_expert_sum(n) \
+    ggml_cuda_kernel_launch(weighted_expert_sum_f32<n>, launch_params, \
+        (const float *) experts->data, (const float *) weights->data, result.get(), \
+        n_embd, n_tokens, experts->nb[1] / sizeof(float), experts->nb[2] / sizeof(float), \
+        weights->nb[1] / sizeof(float), weights->nb[2] / sizeof(float))
+    switch (n_expert_used) {
+        case 2: launch_weighted_expert_sum(2); break;
+        case 3: launch_weighted_expert_sum(3); break;
+        case 4: launch_weighted_expert_sum(4); break;
+        case 5: launch_weighted_expert_sum(5); break;
+        case 6: launch_weighted_expert_sum(6); break;
+        case 7: launch_weighted_expert_sum(7); break;
+        case 8: launch_weighted_expert_sum(8); break;
+        default: GGML_ABORT("unsupported expert count");
+    }
+#undef launch_weighted_expert_sum
+
+    CUDA_CHECK(cudaMemcpyAsync(dst->data, result.get(), ggml_nbytes(dst), cudaMemcpyDeviceToDevice, ctx.stream()));
+}
+
 void ggml_cuda_op_repeat_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
 

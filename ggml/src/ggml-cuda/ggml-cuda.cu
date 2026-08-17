@@ -3425,6 +3425,52 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
     }
 
+    if (node->op == GGML_OP_MUL && node->type == GGML_TYPE_F32 && node->ne[3] == 1 && node->ne[1] >= 2 && node->ne[1] <= 8) {
+        const int n_expert_used = node->ne[1];
+        const int n_ops = 2 * n_expert_used;
+        if (i + n_ops <= cgraph->n_nodes) {
+            std::vector<ggml_op> ops = { GGML_OP_MUL };
+            ops.insert(ops.end(), n_expert_used, GGML_OP_VIEW);
+            ops.insert(ops.end(), n_expert_used - 1, GGML_OP_ADD);
+            const int output_idx = i + n_ops - 1;
+
+            if (ggml_can_fuse_subgraph(cgraph, i, n_ops, ops.data(), &output_idx, 1)) {
+                const ggml_tensor * experts = ggml_are_same_shape(node, node->src[0]) ? node->src[0] : node->src[1];
+                const ggml_tensor * weights = experts == node->src[0] ? node->src[1] : node->src[0];
+                ggml_tensor * output = cgraph->nodes[output_idx];
+                bool valid = experts->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_F32 &&
+                    experts->ne[0] == node->ne[0] && experts->ne[1] == n_expert_used && experts->ne[2] == node->ne[2] &&
+                    experts->ne[3] == 1 && weights->ne[0] == 1 && weights->ne[1] == n_expert_used &&
+                    weights->ne[2] == node->ne[2] && weights->ne[3] == 1 &&
+                    ggml_is_contiguous(experts) && ggml_is_contiguous(weights) && ggml_is_contiguous(output) &&
+                    output->type == GGML_TYPE_F32 && output->ne[0] == node->ne[0] && output->ne[1] == node->ne[2] &&
+                    output->ne[2] == 1 && output->ne[3] == 1 && ggml_nelements(output) <= UINT32_MAX;
+
+                for (int j = 0; valid && j < n_expert_used; ++j) {
+                    const ggml_tensor * view = cgraph->nodes[i + 1 + j];
+                    valid = view->src[0] == node && view->ne[0] == node->ne[0] && view->ne[1] == node->ne[2] &&
+                        view->ne[2] == 1 && view->ne[3] == 1 && view->nb[0] == sizeof(float) &&
+                        view->nb[1] == node->nb[2] && view->view_offs == size_t(j) * node->nb[1];
+                }
+
+                const int add_start = i + 1 + n_expert_used;
+                if (valid) {
+                    const ggml_tensor * first = cgraph->nodes[add_start];
+                    valid = first->src[0] == cgraph->nodes[i + 1] && first->src[1] == cgraph->nodes[i + 2];
+                }
+                for (int j = 2; valid && j < n_expert_used; ++j) {
+                    const ggml_tensor * add = cgraph->nodes[add_start + j - 1];
+                    valid = add->src[0] == cgraph->nodes[add_start + j - 2] && add->src[1] == cgraph->nodes[i + 1 + j];
+                }
+
+                if (valid) {
+                    ggml_cuda_op_weighted_expert_sum(*cuda_ctx, node, output, n_expert_used);
+                    return n_ops - 1;
+                }
+            }
+        }
+    }
+
     // multi-(add or mul)
     if (node->op == GGML_OP_ADD || node->op == GGML_OP_MUL) {
         int     n_fuse = 0;

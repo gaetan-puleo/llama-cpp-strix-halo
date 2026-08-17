@@ -3703,6 +3703,48 @@ struct test_relu_sqr : public test_case {
     }
 };
 
+struct test_weighted_expert_sum : public test_case {
+    const int64_t n_embd;
+    const int64_t n_expert_used;
+    const int64_t n_tokens;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "WEIGHTED_EXPERT_SUM";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::string vars() override {
+        return VARS_TO_STR3(n_embd, n_expert_used, n_tokens);
+    }
+
+    test_weighted_expert_sum(int64_t n_embd, int64_t n_expert_used, int64_t n_tokens)
+        : n_embd(n_embd), n_expert_used(n_expert_used), n_tokens(n_tokens) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * experts = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_expert_used, n_tokens);
+        ggml_tensor * weights = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n_expert_used, n_tokens);
+        ggml_tensor * weighted = ggml_mul(ctx, experts, weights);
+        ggml_build_forward_expand(gf, weighted);
+
+        std::vector<ggml_tensor *> views;
+        views.reserve(n_expert_used);
+        for (int64_t i = 0; i < n_expert_used; ++i) {
+            ggml_tensor * view = ggml_view_2d(ctx, weighted, n_embd, n_tokens, weighted->nb[2], i * weighted->nb[1]);
+            ggml_build_forward_expand(gf, view);
+            views.push_back(view);
+        }
+
+        ggml_tensor * out = views[0];
+        for (int64_t i = 1; i < n_expert_used; ++i) {
+            out = ggml_add(ctx, out, views[i]);
+            ggml_build_forward_expand(gf, out);
+        }
+        return out;
+    }
+};
+
 // GGML_OP_UNARY(SILU|SIGMOID|SOFTPLUS) + GGML_OP_MUL (fused operation).
 // `layout` and `tail` are used for fallback cases where fusion must be skipped
 struct test_unary_mul : public test_case {
@@ -9058,6 +9100,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         test_cases.emplace_back(new test_add_rms_norm(GGML_TYPE_F32, {n, 1, 1, 1}, 1e-6f, false));
     }
+
+    test_cases.emplace_back(new test_weighted_expert_sum(127, 2, 3));
+    test_cases.emplace_back(new test_weighted_expert_sum(128, 4, 5));
+    test_cases.emplace_back(new test_weighted_expert_sum(2048, 8, 32));
 
     for (auto multi_add : {false, true}) {
         for (auto set_rows : {false, true}) {
