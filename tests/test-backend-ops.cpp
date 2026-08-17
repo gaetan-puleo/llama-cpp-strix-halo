@@ -3745,6 +3745,30 @@ struct test_weighted_expert_sum : public test_case {
     }
 };
 
+struct test_shared_mul_add : public test_case {
+    const int64_t n_embd;
+    const int64_t n_tokens;
+
+    test_shared_mul_add(int64_t n_embd, int64_t n_tokens) : n_embd(n_embd), n_tokens(n_tokens) {}
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "SHARED_MUL_ADD";
+    }
+
+    std::string vars() override { return VARS_TO_STR2(n_embd, n_tokens); }
+    bool run_whole_graph() override { return true; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+        ggml_tensor * gate = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, n_tokens);
+        ggml_tensor * other = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+        ggml_tensor * residual = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+        ggml_tensor * mul = ggml_mul(ctx, src, gate);
+        return ggml_add(ctx, ggml_add(ctx, other, mul), residual);
+    }
+};
+
 // GGML_OP_UNARY(SILU|SIGMOID|SOFTPLUS) + GGML_OP_MUL (fused operation).
 // `layout` and `tail` are used for fallback cases where fusion must be skipped
 struct test_unary_mul : public test_case {
@@ -9149,6 +9173,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_weighted_expert_sum(127, 2, 3));
     test_cases.emplace_back(new test_weighted_expert_sum(128, 4, 5));
     test_cases.emplace_back(new test_weighted_expert_sum(2048, 8, 32));
+    test_cases.emplace_back(new test_shared_mul_add(127, 3));
+    test_cases.emplace_back(new test_shared_mul_add(2048, 32));
     test_cases.emplace_back(new test_swiglu_q8_mmq(false, 1, 1, 2048, 32, 512));
     test_cases.emplace_back(new test_swiglu_q8_mmq(true, 16, 8, 2048, 32, 512));
 

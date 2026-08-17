@@ -596,6 +596,32 @@ void ggml_cuda_op_weighted_expert_sum(ggml_backend_cuda_context & ctx, ggml_tens
     CUDA_CHECK(cudaMemcpyAsync(dst->data, result.get(), ggml_nbytes(dst), cudaMemcpyDeviceToDevice, ctx.stream()));
 }
 
+static __global__ void shared_mul_add_f32(
+        const float * src, const float * gate, const float * other, const float * residual, float * dst,
+        int64_t n_embd, int64_t nelements) {
+    const int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= nelements) {
+        return;
+    }
+    volatile float product = src[index] * gate[index / n_embd];
+    float value = other[index] + product;
+    dst[index] = value + residual[index];
+}
+
+void ggml_cuda_op_shared_mul_add(
+        ggml_backend_cuda_context & ctx, ggml_tensor * mul, const ggml_tensor * other,
+        const ggml_tensor * residual, ggml_tensor * dst) {
+    const ggml_tensor * src = ggml_are_same_shape(mul, mul->src[0]) ? mul->src[0] : mul->src[1];
+    const ggml_tensor * gate = src == mul->src[0] ? mul->src[1] : mul->src[0];
+    const int threads = 256;
+    const int64_t nelements = ggml_nelements(dst);
+    const int blocks = (nelements + threads - 1) / threads;
+    const ggml_cuda_kernel_launch_params launch_params(blocks, threads, 0, ctx.stream());
+    ggml_cuda_kernel_launch(shared_mul_add_f32, launch_params,
+        (const float *) src->data, (const float *) gate->data, (const float *) other->data,
+        (const float *) residual->data, (float *) dst->data, dst->ne[0], nelements);
+}
+
 void ggml_cuda_op_repeat_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
 

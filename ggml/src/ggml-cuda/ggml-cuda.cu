@@ -3453,6 +3453,39 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
     }
 
+    if (node->op == GGML_OP_MUL && i + 2 < cgraph->n_nodes &&
+        ggml_can_fuse_subgraph(cgraph, i, { GGML_OP_MUL, GGML_OP_ADD, GGML_OP_ADD }, { i + 2 })) {
+        ggml_tensor * add0 = cgraph->nodes[i + 1];
+        ggml_tensor * add1 = cgraph->nodes[i + 2];
+        const ggml_tensor * src = ggml_are_same_shape(node, node->src[0]) ? node->src[0] : node->src[1];
+        const ggml_tensor * gate = src == node->src[0] ? node->src[1] : node->src[0];
+        const ggml_tensor * other = add0->src[0];
+        const ggml_tensor * residual = add1->src[1];
+        const uintptr_t gate_begin = (uintptr_t) gate->data;
+        const uintptr_t gate_end = gate_begin + ggml_backend_buft_get_alloc_size(gate->buffer->buft, gate);
+        const uintptr_t dst_begin = (uintptr_t) add1->data;
+        const uintptr_t dst_end = dst_begin + ggml_backend_buft_get_alloc_size(add1->buffer->buft, add1);
+        const bool gate_overlap = gate_begin < dst_end && dst_begin < gate_end;
+        const auto safe_output_alias = [&](const ggml_tensor * input) {
+            const uintptr_t begin = (uintptr_t) input->data;
+            const uintptr_t end = begin + ggml_backend_buft_get_alloc_size(input->buffer->buft, input);
+            return !(begin < dst_end && dst_begin < end) || (input->data == add1->data && ggml_are_same_layout(input, add1));
+        };
+
+        if (add0->src[1] == node && add1->src[0] == add0 && other != node && residual != node && residual != add0 &&
+            node->type == GGML_TYPE_F32 &&
+            src->type == GGML_TYPE_F32 && gate->type == GGML_TYPE_F32 && other->type == GGML_TYPE_F32 && residual->type == GGML_TYPE_F32 &&
+            ggml_are_same_shape(node, src) && ggml_are_same_shape(node, other) && ggml_are_same_shape(node, residual) &&
+            gate->ne[0] == 1 && gate->ne[1] == node->ne[1] && gate->ne[2] == node->ne[2] && gate->ne[3] == node->ne[3] &&
+            ggml_is_contiguous(src) && ggml_is_contiguous(gate) && ggml_is_contiguous(other) &&
+            ggml_is_contiguous(residual) && ggml_is_contiguous(add1) && !gate_overlap &&
+            safe_output_alias(src) && safe_output_alias(other) && safe_output_alias(residual) &&
+            ggml_nelements(add1) <= int64_t(INT_MAX) * 256) {
+            ggml_cuda_op_shared_mul_add(*cuda_ctx, node, other, residual, add1);
+            return 2;
+        }
+    }
+
     if (node->op == GGML_OP_MUL && node->type == GGML_TYPE_F32 && node->ne[3] == 1 && node->ne[1] >= 2 && node->ne[1] <= 8) {
         const int n_expert_used = node->ne[1];
         const int n_ops = 2 * n_expert_used;
