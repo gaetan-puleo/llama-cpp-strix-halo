@@ -1,4 +1,5 @@
 #include "quantize.cuh"
+#include "unary.cuh"
 #include <cstdint>
 
 #if defined(BLACKWELL_MMA_AVAILABLE)
@@ -555,6 +556,61 @@ static __global__ void quantize_mmq_q8_1(
     GGML_UNUSED(n_expert_used);
 }
 
+static __global__ void quantize_mmq_q8_1_swiglu(
+        const float * __restrict__ gate, const float * __restrict__ up, const int32_t * __restrict__ ids,
+        void * __restrict__ vy, const int64_t ne00, const int64_t ne0, const int ne1, const int logical_n1,
+        const int64_t gate_s1, const int64_t gate_st, const int64_t up_s1, const int64_t up_st) {
+    const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
+    if (i0 >= ne0) {
+        return;
+    }
+
+    const int64_t logical_row = ids ? ids[blockIdx.x] : blockIdx.x;
+    const int64_t slot = logical_row % logical_n1;
+    const int64_t token = logical_row / logical_n1;
+    const int64_t gate_base = token * gate_st + slot * gate_s1;
+    const int64_t up_base = token * up_st + slot * up_s1;
+
+    ggml_cuda_pdl_sync();
+    float values[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        if (i0 + i < ne00) {
+            volatile float value = ggml_cuda_op_silu_single(gate[gate_base + i0 + i]) * up[up_base + i0 + i];
+            values[i] = value;
+        } else {
+            values[i] = 0.0f;
+        }
+    }
+    const float4 xi = make_float4(values[0], values[1], values[2], values[3]);
+
+    float amax = fabsf(xi.x);
+    amax = fmaxf(amax, fabsf(xi.y));
+    amax = fmaxf(amax, fabsf(xi.z));
+    amax = fmaxf(amax, fabsf(xi.w));
+#pragma unroll
+    for (int offset = 4; offset > 0; offset >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
+    }
+
+    const float d_inv = 127.0f / amax;
+    char4 q;
+    q.x = roundf(xi.x * d_inv);
+    q.y = roundf(xi.y * d_inv);
+    q.z = roundf(xi.z * d_inv);
+    q.w = roundf(xi.w * d_inv);
+    const float d = 1.0f / d_inv;
+
+    block_q8_1_mmq * y = (block_q8_1_mmq *) vy;
+    const int64_t k_block = i0 / QK8_1_MMQ;
+    const int64_t iqs = i0 % QK8_1_MMQ;
+    const int64_t ib = k_block * ne1 + blockIdx.x;
+    ((char4 *) y[ib].qs)[iqs / 4] = q;
+    if (iqs % 32 == 0) {
+        y[ib].d4[iqs / 32] = d;
+    }
+}
+
 void quantize_row_q8_1_cuda(
         const float * x, const int32_t * ids, void * vy, const ggml_type type_src0,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
@@ -600,6 +656,20 @@ void quantize_mmq_q8_1_cuda(
             GGML_ABORT("fatal error");
             break;
     }
+}
+
+void quantize_mmq_q8_1_swiglu_cuda(
+        const float * gate, const float * up, const int32_t * ids, void * vy, const ggml_type type_src0,
+        const int64_t ne00, const int64_t ne0, const int64_t ne1, const int logical_n1,
+        const int64_t gate_s1, const int64_t gate_st, const int64_t up_s1, const int64_t up_st, cudaStream_t stream) {
+    GGML_ASSERT(mmq_get_q8_1_ds_layout(type_src0) == MMQ_Q8_1_DS_LAYOUT_D4);
+    GGML_ASSERT(ne00 % 4 == 0);
+    GGML_ASSERT(ne0 % QK8_1_MMQ == 0);
+    const int64_t block_num_y = (ne0 + 4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
+    const dim3 num_blocks(ne1, block_num_y, 1);
+    const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
+    quantize_mmq_q8_1_swiglu<<<num_blocks, block_size, 0, stream>>>(
+        gate, up, ids, vy, ne00, ne0, ne1, logical_n1, gate_s1, gate_st, up_s1, up_st);
 }
 
 // scatter=true reuses the quant kernel: grid over tokens, ids = inverse map (token slot -> compact row)

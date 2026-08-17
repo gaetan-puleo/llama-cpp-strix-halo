@@ -3293,6 +3293,34 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
     }
 
+    if (node->op == GGML_OP_GLU && i + 1 < cgraph->n_nodes && ggml_get_glu_op(node) == GGML_GLU_OP_SWIGLU && node->src[1]) {
+        ggml_tensor * next = cgraph->nodes[i + 1];
+        const bool has_ids = next->op == GGML_OP_MUL_MAT_ID;
+        if (has_ids || next->op == GGML_OP_MUL_MAT) {
+            const ggml_tensor * weights = next->src[0];
+            const ggml_tensor * ids = has_ids ? next->src[2] : nullptr;
+            const ggml_tensor * gate = node->src[0];
+            const ggml_tensor * up = node->src[1];
+            const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
+            const int64_t mmq_cols = has_ids ? node->ne[2] : node->ne[1];
+            const int64_t n_experts = has_ids ? weights->ne[2] : 0;
+            const bool bad_padding_clear = ggml_backend_buffer_get_usage(weights->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE &&
+                ggml_nbytes(weights) != ggml_backend_buffer_get_alloc_size(weights->buffer, weights) && weights->view_src;
+
+            const bool shape_ok = next->src[1] == node && gate->type == GGML_TYPE_F32 && up->type == GGML_TYPE_F32 &&
+                node->type == GGML_TYPE_F32 && next->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_Q8_0 &&
+                ggml_are_same_shape(gate, up) && ggml_are_same_shape(gate, node) && gate->nb[0] == sizeof(float) && up->nb[0] == sizeof(float) &&
+                gate->ne[3] == 1 && (has_ids ? gate->ne[1] == ids->ne[0] && gate->ne[2] == ids->ne[1] : gate->ne[2] == 1);
+            const bool use_mmq = shape_ok && !bad_padding_clear && GGML_CUDA_CC_IS_RDNA3_5(cc) &&
+                ggml_cuda_should_use_mmq(weights->type, cc, mmq_cols, n_experts);
+
+            if (use_mmq && ggml_can_fuse_subgraph(cgraph, i, { GGML_OP_GLU, next->op }, { i + 1 })) {
+                ggml_cuda_mul_mat_q_swiglu(*cuda_ctx, weights, ids, next, node);
+                return 1;
+            }
+        }
+    }
+
     //topk-moe
     if (cgraph->nodes[i]->op == GGML_OP_UNARY || cgraph->nodes[i]->op == GGML_OP_SOFT_MAX ||
             cgraph->nodes[i]->op == GGML_OP_ARGSORT) {

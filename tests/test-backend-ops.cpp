@@ -4778,6 +4778,51 @@ struct test_mul_mat_id : public test_case {
     }
 };
 
+struct test_swiglu_q8_mmq : public test_case {
+    const bool use_id;
+    const int n_mats;
+    const int n_used;
+    const int64_t m;
+    const int64_t n;
+    const int64_t k;
+
+    test_swiglu_q8_mmq(bool use_id, int n_mats, int n_used, int64_t m, int64_t n, int64_t k)
+        : use_id(use_id), n_mats(n_mats), n_used(n_used), m(m), n(n), k(k) {}
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "SWIGLU_Q8_MMQ";
+    }
+
+    std::string vars() override {
+        return VARS_TO_STR6(use_id, n_mats, n_used, m, n, k);
+    }
+
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-4; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        if (!use_id) {
+            ggml_tensor * gate = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+            ggml_tensor * up = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+            ggml_tensor * down = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m);
+            return ggml_mul_mat(ctx, down, ggml_swiglu_split(ctx, gate, up));
+        }
+
+        ggml_tensor * gate = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, n_used, n);
+        ggml_tensor * up = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, n_used, n);
+        ggml_tensor * down = ggml_new_tensor_3d(ctx, GGML_TYPE_Q8_0, k, m, n_mats);
+        ggml_tensor * ids_all = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, n);
+        ggml_set_name(ids_all, "ids");
+        ggml_tensor * ids = ggml_view_2d(ctx, ids_all, n_used, n, ids_all->nb[1], 0);
+        return ggml_mul_mat_id(ctx, down, ggml_swiglu_split(ctx, gate, up), ids);
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        init_mul_mat_id_tensors(ctx, n_mats);
+    }
+};
+
 // GGML_OP_MUL_MAT_ID + GGML_OP_ADD or GGML_OP_MUL
 struct test_mul_mat_id_fusion : public test_case {
     const ggml_type type_a;
@@ -9104,6 +9149,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_weighted_expert_sum(127, 2, 3));
     test_cases.emplace_back(new test_weighted_expert_sum(128, 4, 5));
     test_cases.emplace_back(new test_weighted_expert_sum(2048, 8, 32));
+    test_cases.emplace_back(new test_swiglu_q8_mmq(false, 1, 1, 2048, 32, 512));
+    test_cases.emplace_back(new test_swiglu_q8_mmq(true, 16, 8, 2048, 32, 512));
 
     for (auto multi_add : {false, true}) {
         for (auto set_rows : {false, true}) {
