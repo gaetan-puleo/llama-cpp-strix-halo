@@ -213,6 +213,7 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(192, 128, 32, 256, 2,  32,  64)
 
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2, 256, 2, 128,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  3,  96, 8,  32,  64)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  4, 256, 2,  64, 128)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 256, 2,  64, 128)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 16, 256, 2,  32, 128)
@@ -291,6 +292,7 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(192, 128, 32, 256, 3,  64,  64)
 
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2,  64, 8,  32,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  3,  96, 8,  32,  64)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  4, 128, 6,  32, 256)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 128, 6,  32, 256)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 16, 256, 5,  32, 256)
@@ -1215,6 +1217,13 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_cuda_context & ctx, ggm
     const int cc        = ggml_cuda_info().devices[id].cc;
     const int warp_size = 32;
 
+    if constexpr (ncols2 == 3) {
+        const int nwarps    = ggml_cuda_fattn_tile_get_nthreads (DKQ, DV, 3, cc) / warp_size;
+        const int nbatch_fa = ggml_cuda_fattn_tile_get_nbatch_fa(DKQ, DV, 3, cc);
+        launch_fattn_tile_case<DKQ, DV, 1, 3, use_logit_softcap>(ctx, dst, nwarps, nbatch_fa, warp_size);
+        return;
+    } else {
+
 #ifdef GGML_USE_HIP
     if constexpr (DKQ <= 128) {
         if (Q->ne[1] > 32/ncols2) {
@@ -1284,7 +1293,8 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_cuda_context & ctx, ggm
         return;
     }
 
-    GGML_ABORT("fatal error");
+        GGML_ABORT("fatal error");
+    }
 }
 
 template <int DKQ, int DV, bool use_logit_softcap>
@@ -1292,6 +1302,7 @@ static void launch_fattn_tile_switch_ncols2(ggml_backend_cuda_context & ctx, ggm
     const ggml_tensor * KQV  = dst;
     const ggml_tensor * Q    = dst->src[0];
     const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
     const ggml_tensor * mask = dst->src[3];
 
     float max_bias = 0.0f;
@@ -1350,6 +1361,15 @@ static void launch_fattn_tile_switch_ncols2(ggml_backend_cuda_context & ctx, ggm
     }
 
     if constexpr (DKQ <= 512 && DKQ != 320 && DKQ != 192) {
+        if constexpr (DKQ == 256 && DV == 256) {
+#ifdef GGML_USE_HIP
+            const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+            if (use_gqa_opt && Q->ne[1] == 1 && gqa_ratio == 6 && K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 && GGML_CUDA_CC_IS_RDNA3_5(cc)) {
+                launch_fattn_tile_switch_ncols1<DKQ, DV, 3, use_logit_softcap>(ctx, dst);
+                return;
+            }
+#endif // GGML_USE_HIP
+        }
         if (use_gqa_opt && gqa_ratio % 8 == 0) {
             launch_fattn_tile_switch_ncols1<DKQ, DV, 8, use_logit_softcap>(ctx, dst);
             return;
