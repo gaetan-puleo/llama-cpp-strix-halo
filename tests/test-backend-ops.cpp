@@ -4668,6 +4668,72 @@ struct test_mul_mat : public test_case {
     }
 };
 
+struct test_mul_mat_exact_batch : public test_case {
+    const ggml_type type_a;
+    const int64_t m;
+    const int64_t n;
+    const int64_t k;
+
+    test_mul_mat_exact_batch(ggml_type type_a, int64_t m, int64_t n, int64_t k) : type_a(type_a), m(m), n(n), k(k) {}
+
+    std::string vars() override {
+        return VARS_TO_STR4(type_a, m, n, k);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_2d(ctx, type_a, k, m);
+        ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+        ggml_tensor * batch = ggml_mul_mat(ctx, a, b);
+        ggml_mul_mat_set_hint(batch, GGML_HINT_EXACT_BATCH);
+
+        ggml_tensor * diff = nullptr;
+        for (int64_t col = 0; col < n; ++col) {
+            ggml_tensor * b_col = ggml_view_2d(ctx, b, k, 1, b->nb[1], col*b->nb[1]);
+            ggml_tensor * single = ggml_mul_mat(ctx, a, b_col);
+            ggml_tensor * batch_col = ggml_view_2d(ctx, batch, m, 1, batch->nb[1], col*batch->nb[1]);
+            ggml_tensor * col_diff = ggml_sub(ctx, batch_col, single);
+            diff = diff == nullptr ? col_diff : ggml_concat(ctx, diff, col_diff, 1);
+        }
+        return diff;
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return ggml_op_name(GGML_OP_MUL_MAT);
+    }
+
+    double err(const float * a, const float * b, size_t n) override {
+        GGML_UNUSED(b);
+        double max_abs = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            max_abs = std::max(max_abs, std::abs((double) a[i]));
+        }
+        return max_abs;
+    }
+
+    double max_err() override { return 0.0; }
+
+    bool run_whole_graph() override { return true; }
+};
+
+struct test_mul_mat_pair : public test_case {
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MUL_MAT_PAIR";
+    }
+
+    std::string vars() override { return {}; }
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-4; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a0 = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, 256, 32);
+        ggml_tensor * a1 = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, 256, 32);
+        ggml_tensor * b  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 256, 129);
+        return ggml_add(ctx, ggml_mul_mat(ctx, a0, b), ggml_mul_mat(ctx, a1, b));
+    }
+};
+
 // GGML_HINT_SRC0_IS_HADAMARD
 struct test_mul_mat_hadamard : public test_mul_mat {
     test_mul_mat_hadamard(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
@@ -9357,6 +9423,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int64_t n : {127, 128, 129}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, n, 5120, {1, 1}, {1, 1}));
     }
+    for (int64_t n : {2, 3, 4, 5, 8, 9, 16}) {
+        test_cases.emplace_back(new test_mul_mat_exact_batch(GGML_TYPE_BF16, 128, n, 5120));
+    }
+    test_cases.emplace_back(new test_mul_mat_exact_batch(GGML_TYPE_Q8_0, 128, 4, 5120));
+
     // m == 1, with n on both sides of MMVF_MAX_BATCH_SIZE (8): mmvf below, operand swap above
     for (int64_t n : {1, 7, 8, 9, 16, 128, 512}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 1, n, 2048, {1, 1}, {1, 1}));
@@ -9551,6 +9622,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_F16, GGML_TYPE_F32, 1, 1, false, 8, 16, 1));
     test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_F16, GGML_TYPE_F32, 16, 16, false, 32, 32, 32, 3));
     test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8, 4, false, 512, 129, 256, 2));
+    test_cases.emplace_back(new test_mul_mat_pair());
 
     // gpt-oss issue with Vulkan mmq_id
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
