@@ -3546,35 +3546,38 @@ struct test_rms_norm_back : public test_case {
     }
 };
 
-// GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD
+// GGML_OP_RMS_NORM + GGML_OP_MUL [+ GGML_OP_ADD]
 struct test_rms_norm_mul_add : public test_case {
     const ggml_type type;
     const std::array<int64_t, 4> ne;
     const float eps;
     const bool broadcast;
     const bool multi_add; // test a sequence of adds feeding into rms_norm
+    const bool add;
+    const bool weights;
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
-        return "RMS_NORM_MUL_ADD";
+        return add ? "RMS_NORM_MUL_ADD" : "RMS_NORM_MUL";
     }
 
     bool run_whole_graph() override { return true; }
 
     std::string vars() override {
-        return VARS_TO_STR5(type, ne, eps, broadcast, multi_add);
+        return VARS_TO_STR7(type, ne, eps, broadcast, multi_add, add, weights);
     }
 
     test_rms_norm_mul_add(ggml_type type = GGML_TYPE_F32,
             std::array<int64_t, 4> ne = {64, 5, 4, 3},
-            float eps = 1e-6f, bool broadcast = false, bool multi_add = false)
-        : type(type), ne(ne), eps(eps), broadcast(broadcast), multi_add(multi_add) {}
+            float eps = 1e-6f, bool broadcast = false, bool multi_add = false, bool add = true, bool weights = false)
+        : type(type), ne(ne), eps(eps), broadcast(broadcast), multi_add(multi_add), add(add), weights(weights) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         std::array<int64_t, 4> broadcast_dims = {ne[0]*2, ne[1]*3, ne[2]*3, ne[3]*4};
+        std::array<int64_t, 4> weight_dims = {ne[0], 1, 1, 1};
 
         ggml_tensor * a = ggml_new_tensor(ctx, type, 4, broadcast ? broadcast_dims.data() : ne.data());
-        ggml_tensor * b = ggml_new_tensor(ctx, type, 4, ne.data());
+        ggml_tensor * b = ggml_new_tensor(ctx, type, 4, weights ? weight_dims.data() : ne.data());
         ggml_tensor * c = ggml_new_tensor(ctx, type, 4, ne.data());
 
         ggml_set_param(a);
@@ -3589,7 +3592,10 @@ struct test_rms_norm_mul_add : public test_case {
         if (multi_add) {
             a = ggml_add(ctx, ggml_add(ctx, a, b), c);
         }
-        ggml_tensor * out = ggml_add(ctx, ggml_mul(ctx, ggml_rms_norm(ctx, a, eps), b), c);
+        ggml_tensor * out = ggml_mul(ctx, ggml_rms_norm(ctx, a, eps), b);
+        if (add) {
+            out = ggml_add(ctx, out, c);
+        }
         ggml_set_name(out, "out");
 
         return out;
@@ -6919,6 +6925,53 @@ struct test_l2_norm : public test_case {
     }
 };
 
+struct test_l2_norm_dual : public test_case {
+    const int64_t n_heads;
+    const int64_t n_tokens;
+    const int64_t n_seqs;
+    const float eps_q;
+    const float eps_k;
+
+    ggml_tensor * q_norm = nullptr;
+    ggml_tensor * k_norm = nullptr;
+
+    test_l2_norm_dual(int64_t n_heads, int64_t n_tokens, int64_t n_seqs, float eps_q, float eps_k)
+        : n_heads(n_heads), n_tokens(n_tokens), n_seqs(n_seqs), eps_q(eps_q), eps_k(eps_k) {}
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "L2_NORM_DUAL_S128";
+    }
+
+    std::string vars() override {
+        return VARS_TO_STR5(n_heads, n_tokens, n_seqs, eps_q, eps_k);
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::vector<ggml_tensor *> fusion_test_nodes() override { return { q_norm, k_norm }; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        constexpr int64_t head_size = 128;
+        ggml_tensor * qkv = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 3*head_size*n_heads, n_tokens, n_seqs);
+        ggml_set_name(qkv, "qkv");
+
+        ggml_tensor * q = ggml_view_4d(ctx, qkv, head_size, n_heads, n_tokens, n_seqs,
+            head_size*sizeof(float), qkv->nb[1], qkv->nb[2], 0);
+        ggml_tensor * k = ggml_view_4d(ctx, qkv, head_size, n_heads, n_tokens, n_seqs,
+            head_size*sizeof(float), qkv->nb[1], qkv->nb[2], head_size*n_heads*sizeof(float));
+        ggml_set_name(q, "q");
+        ggml_set_name(k, "k");
+
+        q_norm = ggml_l2_norm(ctx, q, eps_q);
+        k_norm = ggml_l2_norm(ctx, k, eps_k);
+        ggml_set_name(q_norm, "q_norm");
+        ggml_set_name(k_norm, "k_norm");
+
+        return ggml_add(ctx, q_norm, k_norm);
+    }
+};
+
 // GGML_OP_ACC
 struct test_acc : public test_case {
     const ggml_type type;
@@ -9150,6 +9203,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    test_cases.emplace_back(new test_l2_norm_dual(16, 1, 1, 1e-6f, 1e-6f));
+    test_cases.emplace_back(new test_l2_norm_dual(4, 3, 2, 1e-6f, 8.0f));
+
     // in-place tests
     test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {64, 5, 4, 3}, false, 1e-6f, true));
 
@@ -9169,6 +9225,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         test_cases.emplace_back(new test_add_rms_norm(GGML_TYPE_F32, {n, 1, 1, 1}, 1e-6f, false));
     }
+
+    test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {127, 48, 1, 1}, 1e-6f, false, false, false, true));
+    test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {128, 48, 1024, 1}, 1e-6f, false, false, false, true));
+    test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {129, 48, 1, 1}, 1e-6f, false, false, false, true));
 
     test_cases.emplace_back(new test_weighted_expert_sum(127, 2, 3));
     test_cases.emplace_back(new test_weighted_expert_sum(128, 4, 5));
@@ -9294,6 +9354,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
+    for (int64_t n : {127, 128, 129}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, n, 5120, {1, 1}, {1, 1}));
+    }
     // m == 1, with n on both sides of MMVF_MAX_BATCH_SIZE (8): mmvf below, operand swap above
     for (int64_t n : {1, 7, 8, 9, 16, 128, 512}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 1, n, 2048, {1, 1}, {1, 1}));
@@ -9424,6 +9487,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6, 4096, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 1024, 32, 1056, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1024, 32, 1056, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q2_K, GGML_TYPE_F32, 1024, 32, 1280, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8, 2, true, 128, 32, 1056));
 
     // K not a multiple of 32
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F16, 64, 32,  65, {1, 1}, {1, 1}));
@@ -10009,6 +10076,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, 1024, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 8, {4, 1}, 1024, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 8, {6, 1}, 1024, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
     for (int hsk : { 40, 64, 72, 80, 96, 128, 192, 256, 320, 512, 576 }) {
         for (int hsv : { 40, 64, 72, 80, 96, 128, 192, 256, 512 }) {
