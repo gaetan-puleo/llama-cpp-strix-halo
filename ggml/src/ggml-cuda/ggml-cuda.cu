@@ -4155,6 +4155,24 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return 1;
     }
 
+    if (node->op == GGML_OP_CONT && i + 2 < cgraph->n_nodes) {
+        ggml_tensor * unary = cgraph->nodes[i + 1];
+        ggml_tensor * mul = cgraph->nodes[i + 2];
+        const ggml_tensor * gate = node->src[0];
+        const ggml_tensor * other = mul->src[0] == unary ? mul->src[1] : mul->src[0];
+        const int out_nodes[] = { i + 2 };
+        if (unary->op == GGML_OP_UNARY && ggml_get_unary_op(unary) == GGML_UNARY_OP_SIGMOID && mul->op == GGML_OP_MUL &&
+                (mul->src[0] == unary || mul->src[1] == unary) && gate->type == GGML_TYPE_F32 && other->type == GGML_TYPE_F32 &&
+                gate->nb[0] == sizeof(float) && gate->nb[1] == 2 * gate->ne[0] * sizeof(float) &&
+                gate->nb[2] == gate->nb[1] * gate->ne[1] && gate->nb[3] == gate->nb[2] * gate->ne[2] &&
+                ggml_is_contiguous(other) && ggml_are_same_shape(gate, other) &&
+                ggml_can_fuse_subgraph(cgraph, i, { GGML_OP_CONT, GGML_OP_UNARY, GGML_OP_MUL }, { i + 2 }) &&
+                ggml_cuda_check_fusion_memory_ranges(cgraph, i, 3, out_nodes, 1)) {
+            ggml_cuda_op_cont_sigmoid_mul(*cuda_ctx, node, unary, mul);
+            return 2;
+        }
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SILU }) ||
         ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SIGMOID }) ||
         ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SOFTPLUS })) {
