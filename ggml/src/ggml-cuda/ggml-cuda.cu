@@ -3279,6 +3279,32 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    if (node->op == GGML_OP_L2_NORM && i + 2 < cgraph->n_nodes &&
+        GGML_CUDA_CC_IS_AMD(ggml_cuda_info().devices[cuda_ctx->device].cc)) {
+        ggml_tensor * k_view = cgraph->nodes[i + 1];
+        ggml_tensor * k_norm = cgraph->nodes[i + 2];
+        const ggml_tensor * q_view = node->src[0];
+        const int out_nodes[] = { i, i + 2 };
+        const bool graph_ok = k_view->op == GGML_OP_VIEW && k_norm->op == GGML_OP_L2_NORM &&
+            k_norm->src[0] == k_view && (k_view->flags & GGML_TENSOR_FLAG_COMPUTE) != 0 &&
+            (k_norm->flags & GGML_TENSOR_FLAG_COMPUTE) != 0 && ggml_node_get_use_count(cgraph, i + 1) == 1 &&
+            (k_view->flags & GGML_TENSOR_FLAG_OUTPUT) == 0;
+        const bool shape_ok = q_view && q_view->op == GGML_OP_VIEW && q_view->view_src &&
+            q_view->view_src == k_view->view_src && node->ne[0] == 128 && ggml_are_same_shape(node, k_norm) &&
+            ggml_are_same_shape(q_view, k_view) && q_view->type == GGML_TYPE_F32 && k_view->type == GGML_TYPE_F32 &&
+            node->type == GGML_TYPE_F32 && k_norm->type == GGML_TYPE_F32;
+        const bool layout_ok = shape_ok && ggml_is_contiguous_rows(q_view) && ggml_is_contiguous_rows(k_view) &&
+            ggml_is_contiguous(node) && ggml_is_contiguous(k_norm) &&
+            q_view->nb[1] == k_view->nb[1] && q_view->nb[2] == k_view->nb[2] && q_view->nb[3] == k_view->nb[3] &&
+            k_view->view_offs == q_view->view_offs + ggml_row_size(q_view->type, q_view->ne[0])*q_view->ne[1] &&
+            q_view->nb[2] > ggml_row_size(q_view->type, q_view->ne[0])*q_view->ne[1] && q_view->ne[2] <= UINT16_MAX/2;
+
+        if (graph_ok && layout_ok && ggml_cuda_check_fusion_memory_ranges(cgraph, i, 3, out_nodes, 2)) {
+            ggml_cuda_op_l2_norm_dual_s128(*cuda_ctx, node, k_norm);
+            return 2;
+        }
+    }
+
     // gated_delta_net -> cpy: scatter recurrent-state snapshots into the cache
     if (node->op == GGML_OP_GATED_DELTA_NET) {
         ggml_cuda_gated_delta_net_fused_cache fused_state_cpy;
