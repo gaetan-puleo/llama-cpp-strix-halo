@@ -671,6 +671,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
     ggml_tensor * indexer_score = nullptr;
     if (cparams.fused_lid) {
         indexer_score = ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask);
+        ggml_lightning_indexer_set_top_k(indexer_score, hparams.indexer_top_k);
         cb(indexer_score, "lid_score_masked", il);
         res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, indexer_score, il});
     } else {

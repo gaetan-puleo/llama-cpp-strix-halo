@@ -6394,6 +6394,14 @@ struct ggml_tensor * ggml_lightning_indexer(
     return result;
 }
 
+void ggml_lightning_indexer_set_top_k(
+        struct ggml_tensor * indexer,
+        int32_t              top_k) {
+    GGML_ASSERT(indexer->op == GGML_OP_LIGHTNING_INDEXER);
+    GGML_ASSERT(top_k >= 0);
+    ggml_set_op_params_i32(indexer, 0, top_k);
+}
+
 // ggml_dsv4_hc_comb
 
 struct ggml_tensor * ggml_dsv4_hc_comb(

@@ -125,6 +125,19 @@ static __global__ void top_k_radix_f32_i32(
         }
     }
 }
+
+void ggml_cuda_top_k_f32_i32(
+        ggml_backend_cuda_context & ctx,
+        const float * src,
+        int * dst,
+        int ncols,
+        uint32_t nrows,
+        int k) {
+    const dim3 block_size(256, 1, 1);
+    const dim3 grid_size(nrows, 1, 1);
+    top_k_radix_f32_i32<<<grid_size, block_size, 0, ctx.stream()>>>(src, dst, ncols, k);
+    CUDA_CHECK(cudaGetLastError());
+}
 #endif // GGML_USE_HIP
 
 void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -148,10 +161,7 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(nrows <= UINT_MAX);
         GGML_ASSERT(k > 0 && k <= INT_MAX);
 
-        const dim3 block_size(256, 1, 1);
-        const dim3 grid_size(nrows, 1, 1);
-        top_k_radix_f32_i32<<<grid_size, block_size, 0, stream>>>(src0_d, dst_d, ncols, k);
-        CUDA_CHECK(cudaGetLastError());
+        ggml_cuda_top_k_f32_i32(ctx, src0_d, dst_d, ncols, (uint32_t) nrows, k);
         return;
     }
 #endif // GGML_USE_HIP

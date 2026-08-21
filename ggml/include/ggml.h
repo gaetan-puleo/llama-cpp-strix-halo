@@ -2621,6 +2621,11 @@ extern "C" {
         struct ggml_tensor  * weights,
         struct ggml_tensor  * mask);
 
+    // Allows backends to preserve only the highest top_k scores.
+    GGML_API void ggml_lightning_indexer_set_top_k(
+            struct ggml_tensor * indexer,
+            int32_t              top_k);
+
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)
     // using a richer representation through streams.

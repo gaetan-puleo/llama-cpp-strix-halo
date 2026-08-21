@@ -7843,9 +7843,10 @@ struct test_lightning_indexer : public test_case {
     const int64_t nm; // ne[3] of mask
 
     const ggml_type type_K;
+    const int64_t top_k;
 
     std::string vars() override {
-        return VARS_TO_STR7(hsk, nh, kv, nb, ns, nm, type_K);
+        return VARS_TO_STR8(hsk, nh, kv, nb, ns, nm, type_K, top_k);
     }
 
     double max_nmse_err() override {
@@ -7857,8 +7858,12 @@ struct test_lightning_indexer : public test_case {
         return ((2 * hsk + 2) * nh + 1) * kv * nb * ns;
     }
 
-    test_lightning_indexer(int64_t hsk = 128, int64_t nh = 64, int64_t kv = 256, int64_t nb = 128, int64_t ns = 1, int64_t nm = 1, ggml_type type_K = GGML_TYPE_F16)
-        : hsk(hsk), nh(nh), kv(kv), nb(nb), ns(ns), nm(nm), type_K(type_K) {}
+    bool run_whole_graph() override {
+        return top_k > 0;
+    }
+
+    test_lightning_indexer(int64_t hsk = 128, int64_t nh = 64, int64_t kv = 256, int64_t nb = 128, int64_t ns = 1, int64_t nm = 1, ggml_type type_K = GGML_TYPE_F16, int64_t top_k = 0)
+        : hsk(hsk), nh(nh), kv(kv), nb(nb), ns(ns), nm(nm), type_K(type_K), top_k(top_k) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hsk, nh, nb, ns);
@@ -7878,6 +7883,19 @@ struct test_lightning_indexer : public test_case {
         ggml_set_name(m, "m");
 
         ggml_tensor * out = ggml_lightning_indexer(ctx, q, k, w, m);
+        if (top_k > 0) {
+            ggml_lightning_indexer_set_top_k(out, top_k);
+            ggml_tensor * ids = ggml_top_k(ctx, out, top_k);
+            ggml_tensor * selected = ggml_fill(ctx, m, 0.0f);
+            selected = ggml_view_4d(ctx, selected, 1, selected->ne[0], selected->ne[1], selected->ne[3],
+                    selected->nb[0], selected->nb[1], selected->nb[2], 0);
+            ids = ggml_view_4d(ctx, ids, ids->ne[0], ids->ne[1], ids->ne[3], 1,
+                    ids->nb[1], ids->nb[2], ids->ne[3]*ids->nb[3], 0);
+            ggml_tensor * ones = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 1, ids->ne[0], ids->ne[1], ids->ne[2]);
+            ones = ggml_fill(ctx, ones, 1.0f);
+            out = ggml_set_rows(ctx, selected, ones, ids);
+            out = ggml_view_4d(ctx, out, out->ne[1], out->ne[2], 1, out->ne[3], out->nb[2], out->nb[3], out->nb[3], 0);
+        }
         ggml_set_name(out, "out");
 
         return out;
@@ -10474,6 +10492,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_lightning_indexer(128, 64, kv, 32, 4, 1, type_K));
         }
     }
+    test_cases.emplace_back(new test_lightning_indexer(128, 64, 2200, 16, 1, 1, GGML_TYPE_F16, 2048));
+    test_cases.emplace_back(new test_lightning_indexer(128, 64, 3000, 16, 1, 1, GGML_TYPE_F16, 2048));
 
     return test_cases;
 }
