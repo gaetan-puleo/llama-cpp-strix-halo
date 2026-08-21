@@ -2523,7 +2523,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
          ggml_tensor * v_mla,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+         ggml_tensor * sparse_indices,
+             int32_t   n_sparse_raw,
+                bool   optimized_attn) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -2560,6 +2563,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+        ggml_flash_attn_ext_set_optimized(cur, optimized_attn);
+        if (sparse_indices) {
+            ggml_flash_attn_ext_add_sparse_indices(cur, sparse_indices, n_sparse_raw);
+        }
 
         if (v_mla) {
 #if 0

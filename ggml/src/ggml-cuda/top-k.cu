@@ -48,6 +48,85 @@ static int next_power_of_2(int x) {
 
 #endif                            // CUB_TOP_K_AVAILABLE
 
+#ifdef GGML_USE_HIP
+static __device__ __forceinline__ uint32_t top_k_ordered_key(const float value) {
+    const uint32_t bits = __float_as_uint(value);
+    return bits ^ ((uint32_t) ((int32_t) bits >> 31) | 0x80000000u);
+}
+
+static __global__ void top_k_radix_f32_i32(
+        const float * __restrict__ src,
+        int * __restrict__ dst,
+        const int ncols,
+        const int k) {
+    const float * src_row = src + (size_t) blockIdx.x*ncols;
+    int * dst_row = dst + (size_t) blockIdx.x*k;
+
+    __shared__ uint32_t histogram[256];
+    __shared__ uint32_t prefix;
+    __shared__ uint32_t prefix_mask;
+    __shared__ int rank;
+    __shared__ int out_count;
+
+    if (threadIdx.x == 0) {
+        prefix = 0;
+        prefix_mask = 0;
+        rank = k - 1;
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        histogram[threadIdx.x] = 0;
+        __syncthreads();
+
+        for (int col = threadIdx.x; col < ncols; col += blockDim.x) {
+            const uint32_t key = top_k_ordered_key(src_row[col]);
+            if ((key & prefix_mask) == prefix) {
+                atomicAdd(&histogram[(key >> shift) & 0xff], 1u);
+            }
+        }
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            int count = 0;
+            for (int bucket = 255; bucket >= 0; --bucket) {
+                const int next = count + histogram[bucket];
+                if (rank < next) {
+                    rank -= count;
+                    prefix |= (uint32_t) bucket << shift;
+                    prefix_mask |= 0xffu << shift;
+                    break;
+                }
+                count = next;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out_count = 0;
+    }
+    __syncthreads();
+
+    for (int col = threadIdx.x; col < ncols; col += blockDim.x) {
+        if (top_k_ordered_key(src_row[col]) > prefix) {
+            dst_row[atomicAdd(&out_count, 1)] = col;
+        }
+    }
+    __syncthreads();
+
+    for (int col = threadIdx.x; col < ncols; col += blockDim.x) {
+        if (top_k_ordered_key(src_row[col]) == prefix) {
+            const int out = atomicAdd(&out_count, 1);
+            if (out < k) {
+                dst_row[out] = col;
+            }
+        }
+    }
+}
+#endif // GGML_USE_HIP
+
 void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0   = dst->src[0];
     const float *       src0_d = (const float *) src0->data;
@@ -63,6 +142,19 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t    nrows = ggml_nrows(src0);
     const int64_t    k     = dst->ne[0];
     ggml_cuda_pool & pool  = ctx.pool();
+#ifdef GGML_USE_HIP
+    if (ncols > 1024) {
+        GGML_ASSERT(ncols <= INT_MAX);
+        GGML_ASSERT(nrows <= UINT_MAX);
+        GGML_ASSERT(k > 0 && k <= INT_MAX);
+
+        const dim3 block_size(256, 1, 1);
+        const dim3 grid_size(nrows, 1, 1);
+        top_k_radix_f32_i32<<<grid_size, block_size, 0, stream>>>(src0_d, dst_d, ncols, k);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+#endif // GGML_USE_HIP
 #ifdef CUB_TOP_K_AVAILABLE
     // TODO: Switch to `DeviceSegmentedTopK` for multi-row TopK once implemented
     // https://github.com/NVIDIA/cccl/issues/6391

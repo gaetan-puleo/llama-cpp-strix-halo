@@ -2442,9 +2442,19 @@ extern "C" {
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
+    GGML_API void ggml_flash_attn_ext_set_optimized(
+            struct ggml_tensor * a,
+            bool                 optimized);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
+
+    // Optional iteration hint. Requires an authoritative mask and unique in-range offsets.
+    GGML_API void ggml_flash_attn_ext_add_sparse_indices(
+            struct ggml_tensor * a,
+            struct ggml_tensor * indices,
+            int32_t              n_raw);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

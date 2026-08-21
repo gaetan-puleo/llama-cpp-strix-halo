@@ -28,6 +28,26 @@
 #include "llama.h"
 #include "log.h"
 
+#ifdef LLAMA_BENCH_ROCTX
+#include <rocprofiler-sdk-roctx/roctx.h>
+
+struct scoped_roctx_profile {
+    explicit scoped_roctx_profile(const char * name) {
+        roctxProfilerResume(0);
+        roctxRangePush(name);
+    }
+
+    ~scoped_roctx_profile() {
+        roctxRangePop();
+        roctxProfilerPause(0);
+    }
+};
+#else
+struct scoped_roctx_profile {
+    explicit scoped_roctx_profile(const char *) {}
+};
+#endif
+
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
 #    ifndef NOMINMAX
@@ -2424,6 +2444,7 @@ int llama_bench(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: prompt run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
+                scoped_roctx_profile profile("llama-bench/prompt");
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run prompt\n", __func__);
@@ -2437,6 +2458,7 @@ int llama_bench(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
+                scoped_roctx_profile profile("llama-bench/generation");
                 bool res = test_gen(ctx, t.n_gen, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen\n", __func__);

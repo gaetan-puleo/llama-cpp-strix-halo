@@ -530,6 +530,16 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     return 1;
 }
 
+static constexpr __host__ __device__ int calc_row_groups(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id) {
+    if (table_id == MMVQ_PARAMETERS_RDNA3_5 && ncols_dst == 1 && type == GGML_TYPE_Q8_0) {
+        return 2;
+    }
+    if (table_id == MMVQ_PARAMETERS_RDNA3_5 && ncols_dst == 1 && type == GGML_TYPE_IQ3_XXS) {
+        return 2;
+    }
+    return 1;
+}
+
 template <ggml_type type>
 __launch_bounds__(2 * ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void mul_mat_vec_q4_columns(
@@ -617,7 +627,8 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
 }
 
 template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool halve_iters = false>
-__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id(), small_k, halve_iters)*ggml_cuda_get_physical_warp_size(), 1)
+__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id(), small_k, halve_iters)*
+    calc_row_groups(type, ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void mul_mat_vec_q(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion, float * dst_ptr,
         const uint32_t ncols_x, const uint3 nchannels_y, const uint32_t stride_row_x, const uint32_t stride_col_y,
@@ -641,7 +652,7 @@ static __global__ void mul_mat_vec_q(
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
-    const     int row0 = rows_per_cuda_block*blockIdx.x;
+    const     int row0 = rows_per_cuda_block*(blockIdx.x*blockDim.z + threadIdx.z);
     const     int blocks_per_row_x = ncols_x / qk;
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
 
@@ -915,9 +926,12 @@ static std::pair<dim3, dim3> calc_launch_params(
         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false, const bool halve_iters = false) {
     const int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
     const int rpb = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
-    const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
+    const int max_row_groups = calc_row_groups(type, ncols_dst, table_id);
+    const int row_groups = nrows_x % max_row_groups == 0 ? max_row_groups : 1;
+    GGML_ASSERT(row_groups == 1 || (nwarps == 1 && rpb == 1));
+    const int64_t nblocks = (nrows_x + rpb*row_groups - 1) / (rpb*row_groups);
     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
-    const dim3 block_dims(warp_size, nwarps, 1);
+    const dim3 block_dims(warp_size, nwarps, row_groups);
     return {block_nums, block_dims};
 }
 
