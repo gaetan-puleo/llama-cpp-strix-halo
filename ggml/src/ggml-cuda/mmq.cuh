@@ -1484,6 +1484,15 @@ static_assert(!mmq_use_rdna3_5_q8_id_j48(GGML_TYPE_Q8_0, GGML_CUDA_CC_RDNA3_5, f
 static_assert(!mmq_use_rdna3_5_q8_id_j48(GGML_TYPE_Q8_0, GGML_CUDA_CC_RDNA3_5, false, true, 7936, 256));
 static_assert(!mmq_use_rdna3_5_q8_id_j48(GGML_TYPE_Q8_0, GGML_CUDA_CC_RDNA3_5, false, true, 8193, 256));
 
+static constexpr bool mmq_use_rdna3_5_iq_id_j48(
+        ggml_type type, int cc, bool fallback, bool has_ids, int64_t ncols_dst, int64_t nchannels_y) {
+    return (type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ3_XXS) && GGML_CUDA_CC_IS_RDNA3_5(cc) &&
+        !fallback && has_ids && nchannels_y > 0 && (ncols_dst + nchannels_y - 1) / nchannels_y == 48;
+}
+
+static_assert(mmq_use_rdna3_5_iq_id_j48(GGML_TYPE_IQ2_XS, GGML_CUDA_CC_RDNA3_5, false, true, 12288, 256));
+static_assert(mmq_use_rdna3_5_iq_id_j48(GGML_TYPE_IQ3_XXS, GGML_CUDA_CC_RDNA3_5, false, true, 12288, 256));
+
 template <ggml_type type, bool fallback>
 void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     const int    id    = ggml_cuda_get_device();
@@ -1493,7 +1502,14 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
 
-    if (mmq_use_rdna3_5_q8_id_j48(type, cc, fallback, args.ids_dst != nullptr, args.ncols_dst, args.nchannels_y)) {
+    if (mmq_use_rdna3_5_iq_id_j48(type, cc, fallback, args.ids_dst != nullptr, args.ncols_dst, args.nchannels_y)) {
+        constexpr int J_rdna3_5 = 48;
+        const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J_rdna3_5, fallback, cc);
+        if (config.type != GGML_TYPE_COUNT && mmq_get_nbytes_shared(config, cc) <= smpbo) {
+            J_best = J_rdna3_5;
+            ntiles_J_best = 1;
+        }
+    } else if (mmq_use_rdna3_5_q8_id_j48(type, cc, fallback, args.ids_dst != nullptr, args.ncols_dst, args.nchannels_y)) {
         constexpr int J_rdna3_5 = 48;
         const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J_rdna3_5, fallback, cc);
         if (config.type != GGML_TYPE_COUNT && mmq_get_nbytes_shared(config, cc) <= smpbo) {
