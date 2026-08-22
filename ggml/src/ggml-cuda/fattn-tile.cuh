@@ -749,6 +749,17 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         }
     }
 
+    if constexpr (skip_masked && !sparse_KV) {
+        bool any_selected = false;
+#pragma unroll
+        for (int i = 0; i < nbatch_fa/(np*warp_size); ++i) {
+            any_selected |= KQ_selected[i];
+        }
+        if (!__syncthreads_or(any_selected)) {
+            return;
+        }
+    }
+
     // KQ = K @ Q matrix multiplication:
     constexpr int nbatch_K_last = DKQ % nbatch_K;
 #pragma unroll
@@ -787,9 +798,9 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         KQ_max_new[jc0] = warp_reduce_max<warp_size>(KQ_max_new[jc0]);
     }
 
-    if constexpr (np == 1) {
+    if constexpr (np == 1 && !skip_masked) {
         __syncthreads();
-    } else {
+    } else if constexpr (np > 1) {
         static_assert(cpw == 1, "bad cpw");
         __shared__ float KQ_max_new_shared[nwarps];
         if (threadIdx.x == 0) {
@@ -991,7 +1002,9 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         }
 #endif // FAST_FP16_AVAILABLE
 
-        __syncthreads();
+        if constexpr (!skip_masked) {
+            __syncthreads();
+        }
     }
     }
 }
