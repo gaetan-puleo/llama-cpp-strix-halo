@@ -788,7 +788,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
     cb(kq_mask, "csa_lid_kq_mask", il);
 
     ggml_tensor * out = build_attn_mha(q, k_all, k_all, nullptr, kq_mask, sinks, nullptr, kq_scale, il,
-            nullptr, raw_k->ne[2], il >= 35);
+            nullptr, raw_k->ne[2], false);
     if (k_rot) {
         out = llama_mul_mat_hadamard(ctx0, out, k_rot);
     }
@@ -954,13 +954,9 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
             ggml_row_size(q->type, n_embd_head),
             ggml_row_size(q->type, n_embd_head)*n_head,
             ggml_row_size(q->type, n_embd_head_nope));
-    ggml_tensor * q_nope = ggml_view_3d(ctx0, q, n_embd_head_nope, n_head, nt,
-            ggml_row_size(q->type, n_embd_head),
-            ggml_row_size(q->type, n_embd_head)*n_head,
-            0);
-    q_pe = ggml_rope_ext(ctx0, q_pe, inp_pos, nullptr, n_embd_head_rope, rope_type, n_ctx_orig_l,
+    q_pe = ggml_rope_ext_inplace(ctx0, q_pe, inp_pos, nullptr, n_embd_head_rope, rope_type, n_ctx_orig_l,
             freq_base_l, freq_scale_l, ext_factor_l, attn_factor_l, beta_fast_l, beta_slow_l);
-    q = ggml_concat(ctx0, q_nope, q_pe, 0);
+    q = ggml_dsv4_dep(ctx0, q, q_pe);
     cb(q_pe, "q_pe", il);
     cb(q, "q", il);
 
@@ -973,13 +969,9 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
             ggml_row_size(kv->type, n_embd_head),
             ggml_row_size(kv->type, n_embd_head),
             ggml_row_size(kv->type, n_embd_head_nope));
-    ggml_tensor * kv_nope = ggml_view_3d(ctx0, kv, n_embd_head_nope, 1, nt,
-            ggml_row_size(kv->type, n_embd_head),
-            ggml_row_size(kv->type, n_embd_head),
-            0);
-    kv_pe = ggml_rope_ext(ctx0, kv_pe, inp_pos, nullptr, n_embd_head_rope, rope_type, n_ctx_orig_l,
+    kv_pe = ggml_rope_ext_inplace(ctx0, kv_pe, inp_pos, nullptr, n_embd_head_rope, rope_type, n_ctx_orig_l,
             freq_base_l, freq_scale_l, ext_factor_l, attn_factor_l, beta_fast_l, beta_slow_l);
-    kv = ggml_concat(ctx0, kv_nope, kv_pe, 0);
+    kv = ggml_dsv4_dep(ctx0, kv, kv_pe);
     cb(kv_pe, "kv_pe", il);
     cb(kv, "kv", il);
 

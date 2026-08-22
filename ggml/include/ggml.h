@@ -572,6 +572,7 @@ extern "C" {
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_LIGHTNING_INDEXER,
+        GGML_OP_DSV4_DEP,
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
@@ -2625,6 +2626,11 @@ extern "C" {
     GGML_API void ggml_lightning_indexer_set_top_k(
             struct ggml_tensor * indexer,
             int32_t              top_k);
+
+    GGML_API struct ggml_tensor * ggml_dsv4_dep(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * dep);
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)
