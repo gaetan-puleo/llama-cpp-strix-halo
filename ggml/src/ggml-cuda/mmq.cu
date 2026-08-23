@@ -40,6 +40,15 @@ static bool use_rdna3_5_q6_ling_j32(const mmq_args & args) {
         (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y == 32;
 }
 
+static bool use_rdna3_5_q6_id_narrow(const mmq_args & args) {
+    const int id = ggml_cuda_get_device();
+    const int cc = ggml_cuda_info().devices[id].cc;
+    return args.type_x == GGML_TYPE_Q6_K && GGML_CUDA_CC_IS_RDNA3_5(cc) && args.ids_dst != nullptr &&
+        ((args.ncols_x == 2048 && args.nrows_x == 512) || (args.ncols_x == 512 && args.nrows_x == 2048)) &&
+        args.nchannels_x == 256 && args.nchannels_y > 0 &&
+        (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y == 64;
+}
+
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
         case GGML_TYPE_Q1_0:
@@ -87,7 +96,7 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             }
             break;
         case GGML_TYPE_Q6_K:
-            if (use_rdna3_5_q6_ling_j32(args)) {
+            if (use_rdna3_5_q6_ling_j32(args) || use_rdna3_5_q6_id_narrow(args)) {
                 launch_mul_mat_q_q6_k_j32(ctx, args, stream);
             } else {
                 mul_mat_q_case<GGML_TYPE_Q6_K>(ctx, args, stream);
