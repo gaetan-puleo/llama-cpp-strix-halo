@@ -28,6 +28,7 @@ typedef void (* fattn_kernel_t)(
         const int  * __restrict__ sparse_indices,
         const int32_t sparse_raw,
         const int32_t sparse_count,
+        const int32_t sparse_indexed_raw,
         float      * __restrict__ dst,
         float2     * __restrict__ dst_meta,
         const float scale,
@@ -989,6 +990,7 @@ void launch_fattn(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
     const ggml_tensor * sparse_indices = use_sparse ? dst->src[5] : nullptr;
+    const int sparse_indexed_raw = sparse_indices ? ggml_get_op_params_i32(dst, 7) : -1;
 
     ggml_tensor * KQV = dst;
 
@@ -1119,7 +1121,9 @@ void launch_fattn(
     GGML_ASSERT(max_blocks_per_sm > 0);
     int parallel_blocks = max_blocks_per_sm;
 
-    const int ne_KV = sparse_indices ? ggml_get_op_params_i32(dst, 4) + ggml_get_op_params_i32(dst, 5) : K->ne[1];
+    const int ne_KV = sparse_indices ?
+        (sparse_indexed_raw >= 0 ? ggml_get_op_params_i32(dst, 5) : ggml_get_op_params_i32(dst, 4) + ggml_get_op_params_i32(dst, 5)) :
+        K->ne[1];
     const int ntiles_KV = (ne_KV + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
 
     dim3 blocks_num;
@@ -1230,6 +1234,7 @@ void launch_fattn(
         sparse_indices ? (const int *) sparse_indices->data : nullptr,
         sparse_indices ? ggml_get_op_params_i32(dst, 4) : 0,
         sparse_indices ? ggml_get_op_params_i32(dst, 5) : 0,
+        sparse_indexed_raw,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],

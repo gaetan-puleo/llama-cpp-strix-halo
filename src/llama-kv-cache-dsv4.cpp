@@ -1870,6 +1870,53 @@ void llama_kv_cache_dsv4_raw_context::set_input_kq_mask(ggml_tensor * dst, const
     kv_swa->set_input_kq_mask(dst, ubatch, causal_attn);
 }
 
+void llama_kv_cache_dsv4_raw_context::set_input_local_k_idxs(
+        ggml_tensor * dst, const ggml_tensor * mask, const llama_ubatch * ubatch) const {
+    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+    GGML_ASSERT(mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(mask->buffer));
+    GGML_ASSERT(dst->ne[1]*dst->ne[3] == ubatch->n_tokens);
+    GGML_ASSERT(mask->ne[1]*mask->ne[3] == ubatch->n_tokens);
+
+    int32_t * ids = (int32_t *) dst->data;
+    const int64_t n_local = dst->ne[0];
+    const int64_t n_kv = mask->ne[0];
+
+    const auto fill = [&](const auto * mask_data) {
+        for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+            const llama_seq_id seq_id = ubatch->seq_id[i][0];
+            const auto & cells = kv_swa->get_cells(seq_id);
+            std::vector<std::pair<llama_pos, int32_t>> selected;
+            selected.reserve(n_local);
+
+            for (int32_t j = 0; j < n_kv; ++j) {
+                if (llama_cast<float>(mask_data[(int64_t) i*n_kv + j]) != -INFINITY) {
+                    selected.emplace_back(cells.pos_get(j), j);
+                }
+            }
+
+            GGML_ASSERT((int64_t) selected.size() <= n_local);
+            std::sort(selected.begin(), selected.end());
+
+            int32_t * row = ids + (int64_t) i*n_local;
+            int64_t j = 0;
+            for (; j < (int64_t) selected.size(); ++j) {
+                row[j] = selected[j].second;
+            }
+            for (; j < n_local; ++j) {
+                row[j] = -1;
+            }
+        }
+    };
+
+    if (mask->type == GGML_TYPE_F16) {
+        fill((const ggml_fp16_t *) mask->data);
+    } else {
+        fill((const float *) mask->data);
+    }
+}
+
 void llama_kv_cache_dsv4_raw_context::set_input_k_rot(ggml_tensor * dst) const {
     kv_swa->set_input_k_rot(dst);
 }

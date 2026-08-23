@@ -5394,6 +5394,17 @@ struct ggml_tensor * ggml_top_k(
     return result;
 }
 
+struct ggml_tensor * ggml_top_k_sorted(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   k) {
+    struct ggml_tensor * result = ggml_top_k(ctx, a, k);
+
+    ggml_set_op_params_i32(result, 0, 1);
+
+    return result;
+}
+
 // ggml_arange
 
 struct ggml_tensor * ggml_arange(
@@ -5523,6 +5534,64 @@ void ggml_flash_attn_ext_add_sparse_indices(
     a->src[5] = indices;
     ggml_set_op_params_i32(a, 4, n_raw);
     ggml_set_op_params_i32(a, 5, indices->ne[0]);
+    ggml_set_op_params_i32(a, 7, -1);
+    ggml_set_op_params_i32(a, 8, 0);
+}
+
+void ggml_flash_attn_ext_add_sparse_indices_split(
+        struct ggml_tensor * a,
+        struct ggml_tensor * indices,
+        int32_t              n_raw,
+        int32_t              n_indexed_raw) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] == NULL);
+    GGML_ASSERT(a->src[3] != NULL);
+    GGML_ASSERT(indices && indices->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(indices));
+    GGML_ASSERT(n_raw >= 0 && n_raw <= a->src[1]->ne[1]);
+    GGML_ASSERT(n_indexed_raw >= 0 && n_indexed_raw <= n_raw);
+    GGML_ASSERT(n_indexed_raw <= indices->ne[0]);
+    GGML_ASSERT(indices->ne[0] - n_indexed_raw <= a->src[1]->ne[1] - n_raw);
+    GGML_ASSERT(indices->ne[1] == a->src[0]->ne[1]);
+    GGML_ASSERT(indices->ne[2] == 1);
+    GGML_ASSERT(indices->ne[3] == a->src[0]->ne[3]);
+
+    a->src[5] = indices;
+    ggml_set_op_params_i32(a, 4, n_raw);
+    ggml_set_op_params_i32(a, 5, indices->ne[0]);
+    ggml_set_op_params_i32(a, 7, n_indexed_raw);
+    ggml_set_op_params_i32(a, 8, 0);
+}
+
+void ggml_flash_attn_ext_add_sparse_indices_kv_split(
+        struct ggml_tensor * a,
+        struct ggml_tensor * indices,
+        int32_t              n_indexed_raw) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] == NULL);
+    GGML_ASSERT(a->src[3] != NULL);
+    GGML_ASSERT(indices && indices->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(indices));
+
+    const struct ggml_tensor * raw = a->src[1];
+    const struct ggml_tensor * csa = a->src[2];
+    GGML_ASSERT(raw->type == GGML_TYPE_F16 && csa->type == GGML_TYPE_F16);
+    GGML_ASSERT(raw->ne[0] == 512 && csa->ne[0] == 512);
+    GGML_ASSERT(raw->ne[2] == csa->ne[2]);
+    GGML_ASSERT(raw->ne[3] == csa->ne[3]);
+    GGML_ASSERT(n_indexed_raw >= 0 && n_indexed_raw <= raw->ne[1]);
+    GGML_ASSERT(n_indexed_raw <= indices->ne[0]);
+    GGML_ASSERT(indices->ne[0] - n_indexed_raw <= csa->ne[1]);
+    GGML_ASSERT(indices->ne[1] == a->src[0]->ne[1]);
+    GGML_ASSERT(indices->ne[2] == 1);
+    GGML_ASSERT(indices->ne[3] == a->src[0]->ne[3]);
+    GGML_ASSERT(a->src[3]->ne[0] == raw->ne[1] + csa->ne[1]);
+
+    a->src[5] = indices;
+    ggml_set_op_params_i32(a, 4, raw->ne[1]);
+    ggml_set_op_params_i32(a, 5, indices->ne[0]);
+    ggml_set_op_params_i32(a, 7, n_indexed_raw);
+    ggml_set_op_params_i32(a, 8, 1);
 }
 
 // ggml_flash_attn_back

@@ -212,6 +212,7 @@ public:
 
     void set_input_k_idxs(ggml_tensor * dst) const;
     void set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_local_k_idxs(ggml_tensor * dst, const ggml_tensor * mask, const llama_ubatch * ubatch) const;
     void set_input_k_rot(ggml_tensor * dst) const;
 
 private:

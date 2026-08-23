@@ -6299,16 +6299,17 @@ struct test_top_k : public test_case {
     const std::array<int64_t, 4> ne;
     const int k;
     const bool ties;
+    const bool sorted;
     ggml_tensor * input {};
 
     std::string vars() override {
-        return VARS_TO_STR4(type, ne, k, ties);
+        return VARS_TO_STR5(type, ne, k, ties, sorted);
     }
 
     test_top_k(ggml_type type = GGML_TYPE_F32,
             std::array<int64_t, 4> ne = {16, 10, 10, 10},
-            int k = 4, bool ties = false)
-        : type(type), ne(ne), k(k), ties(ties) {}
+            int k = 4, bool ties = false, bool sorted = false)
+        : type(type), ne(ne), k(k), ties(ties), sorted(sorted) {}
 
     double max_err() override {
         return 0.0;
@@ -6319,6 +6320,14 @@ struct test_top_k : public test_case {
     bool run_whole_graph() override { return ties; }
 
     double err(const float * a, const float * b, size_t n) override {
+        if (sorted) {
+            double diff = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                diff += std::fabs(a[i] - b[i]);
+            }
+            return diff;
+        }
+
         // When there are no ties, we expect the exact same set of indices,
         // but possibly in a different order. When there are ties, the indices
         // can be different but the input values they correspond to should be
@@ -6386,7 +6395,7 @@ struct test_top_k : public test_case {
         // Save 'a' for err()
         input = a;
 
-        ggml_tensor * out = ggml_top_k(ctx, a, k);
+        ggml_tensor * out = sorted ? ggml_top_k_sorted(ctx, a, k) : ggml_top_k(ctx, a, k);
         ggml_set_name(out, "out");
 
         return out;
@@ -7326,14 +7335,17 @@ struct test_flash_attn_ext : public test_case {
     const int64_t sparse_raw;
     const int64_t sparse_count;
     const bool optimized;
+    const int64_t sparse_indexed_raw;
+    const bool sparse_kv_split;
 
     std::string vars() override {
         return VARS_TO_STR16(hsk, hsv, nh, nr23, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_K, type_V, permute, kv_view,
-                sparse_raw) + "," + VAR_TO_STR(sparse_count) + "," + VAR_TO_STR(optimized);
+                sparse_raw) + "," + VAR_TO_STR(sparse_count) + "," + VAR_TO_STR(optimized) + "," + VAR_TO_STR(sparse_indexed_raw) +
+                "," + VAR_TO_STR(sparse_kv_split);
     }
 
     double max_nmse_err() override {
-        return 5e-4;
+        return sparse_indexed_raw >= 0 ? 1e-2 : 5e-4;
     }
 
     uint64_t op_flops(ggml_tensor * t) override {
@@ -7346,9 +7358,11 @@ struct test_flash_attn_ext : public test_case {
     test_flash_attn_ext(int64_t hsk = 128, int64_t hsv = 128, int64_t nh = 32, std::array<int64_t, 2> nr23 = {1, 1}, int64_t kv = 96, int64_t nb = 8,
                         bool mask = true, bool sinks = false, float max_bias = 0.0f, float logit_softcap = 0.0f, ggml_prec prec = GGML_PREC_F32,
                         ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16, std::array<int32_t, 4> permute = {0, 1, 2, 3},
-                        bool kv_view = true, int64_t sparse_raw = 0, int64_t sparse_count = 0, bool optimized = false)
+                        bool kv_view = true, int64_t sparse_raw = 0, int64_t sparse_count = 0, bool optimized = false, int64_t sparse_indexed_raw = -1,
+                        bool sparse_kv_split = false)
         : hsk(hsk), hsv(hsv), nh(nh), nr23(nr23), kv(kv), nb(nb), mask(mask), sinks(sinks), max_bias(max_bias), logit_softcap(logit_softcap), prec(prec),
-          type_K(type_K), type_V(type_V), permute(permute), kv_view(kv_view), sparse_raw(sparse_raw), sparse_count(sparse_count), optimized(optimized) {}
+          type_K(type_K), type_V(type_V), permute(permute), kv_view(kv_view), sparse_raw(sparse_raw), sparse_count(sparse_count), optimized(optimized),
+          sparse_indexed_raw(sparse_indexed_raw), sparse_kv_split(sparse_kv_split) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const int64_t hsk_padded = GGML_PAD(hsk, ggml_blck_size(type_K));
@@ -7376,7 +7390,9 @@ struct test_flash_attn_ext : public test_case {
         ggml_tensor * q = create_permuted(GGML_TYPE_F32, hsk_padded, nb, nh*nr23[0], nr23[1], false);
         ggml_set_name(q, "q");
 
-        ggml_tensor * k = create_permuted(type_K,        hsk_padded, kv, nh,         nr23[1], kv_view); // the K tensor is usually a view of the K cache
+        const int64_t kv_k = sparse_kv_split ? sparse_raw : kv;
+        const int64_t kv_v = sparse_kv_split ? kv - sparse_raw : kv;
+        ggml_tensor * k = create_permuted(type_K,        hsk_padded, kv_k, nh,         nr23[1], kv_view); // the K tensor is usually a view of the K cache
         ggml_set_name(k, "k");
 
         ggml_tensor * v = nullptr;
@@ -7390,7 +7406,7 @@ struct test_flash_attn_ext : public test_case {
             //   - https://github.com/ggml-org/llama.cpp/pull/18986
             v = ggml_view_4d(ctx, k, hsv_padded, kv, nh, nr23[1], k->nb[1], k->nb[2], k->nb[3], 0);
         } else {
-            v = create_permuted(type_V,        hsv_padded, kv, nh,         nr23[1], kv_view); // the V tensor is usually a view of the V cache
+            v = create_permuted(type_V,        hsv_padded, kv_v, nh,         nr23[1], kv_view); // the V tensor is usually a view of the V cache
         }
         ggml_set_name(v, "v");
 
@@ -7413,7 +7429,13 @@ struct test_flash_attn_ext : public test_case {
         if (sparse_count > 0) {
             ggml_tensor * indices = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, sparse_count, nb, 1, nr23[1]);
             ggml_set_name(indices, "sparse_indices");
-            ggml_flash_attn_ext_add_sparse_indices(out, indices, sparse_raw);
+            if (sparse_kv_split) {
+                ggml_flash_attn_ext_add_sparse_indices_kv_split(out, indices, sparse_indexed_raw);
+            } else if (sparse_indexed_raw >= 0) {
+                ggml_flash_attn_ext_add_sparse_indices_split(out, indices, sparse_raw, sparse_indexed_raw);
+            } else {
+                ggml_flash_attn_ext_add_sparse_indices(out, indices, sparse_raw);
+            }
         }
         ggml_set_name(out, "out");
 
@@ -7432,12 +7454,25 @@ struct test_flash_attn_ext : public test_case {
                     for (int64_t is = 0; is < nr23[1]; ++is) {
                         for (int64_t j = 0; j < nb; ++j) {
                             const int64_t row = (is*nb + j)*kv;
-                            for (int64_t i = 0; i < sparse_raw; ++i) {
-                                data[row + i] = ggml_fp32_to_fp16(0.0f);
-                            }
-                            for (int64_t i = 0; i < sparse_count; ++i) {
-                                const int64_t index = (73*i + 17*j + 19*is) % candidates;
-                                data[row + sparse_raw + index] = ggml_fp32_to_fp16(0.0f);
+                            if (sparse_indexed_raw >= 0) {
+                                for (int64_t i = 0; i < sparse_indexed_raw; ++i) {
+                                    if (i % 31 != 0) {
+                                        const int64_t index = sparse_raw - sparse_indexed_raw + i;
+                                        data[row + index] = ggml_fp32_to_fp16(0.0f);
+                                    }
+                                }
+                                for (int64_t i = sparse_indexed_raw; i < sparse_count; ++i) {
+                                    const int64_t index = i - sparse_indexed_raw;
+                                    data[row + sparse_raw + index] = ggml_fp32_to_fp16(0.0f);
+                                }
+                            } else {
+                                for (int64_t i = 0; i < sparse_raw; ++i) {
+                                    data[row + i] = ggml_fp32_to_fp16(0.0f);
+                                }
+                                for (int64_t i = 0; i < sparse_count; ++i) {
+                                    const int64_t index = (73*i + 17*j + 19*is) % candidates;
+                                    data[row + sparse_raw + index] = ggml_fp32_to_fp16(0.0f);
+                                }
                             }
                         }
                     }
@@ -7451,7 +7486,12 @@ struct test_flash_attn_ext : public test_case {
                 for (int64_t is = 0; is < nr23[1]; ++is) {
                     for (int64_t j = 0; j < nb; ++j) {
                         for (int64_t i = 0; i < sparse_count; ++i) {
-                            data[(is*nb + j)*sparse_count + i] = (73*i + 17*j + 19*is) % candidates;
+                            if (sparse_indexed_raw >= 0 && i < sparse_indexed_raw) {
+                                data[(is*nb + j)*sparse_count + i] = i % 31 == 0 ? -1 : sparse_raw - sparse_indexed_raw + i;
+                            } else {
+                                const int64_t i_csa = sparse_indexed_raw >= 0 ? i - sparse_indexed_raw : i;
+                                data[(is*nb + j)*sparse_count + i] = sparse_indexed_raw >= 0 ? i_csa : (73*i_csa + 17*j + 19*is) % candidates;
+                            }
                         }
                     }
                 }
@@ -10061,6 +10101,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2048, 2, 1, 3}, k));
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2049, 2, 1, 3}, k));
     }
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {512, 2, 1, 1}, 512, false, true));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {3072, 2, 1, 1}, 512, false, true));
 
     // exhaustive top_k tests
     //for (int i = 1; i < 9999; ++i) {
@@ -10296,6 +10338,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, 128, 129));
     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {8, 1}, 512, 3, true, false, 0, 0,
             GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, 128, 129));
+
+    // DSv4 split sparse attention: absolute raw IDs followed by compressed relative IDs.
+    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, 1}, 768, 1, true, true, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, 256, 640, false, 128));
+    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {8, 2}, 768, 3, true, false, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, 256, 640, false, 128));
+    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, 1}, 768, 1, true, true, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, 256, 640, false, 128, true));
+    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, 2}, 768, 3, true, false, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, 256, 640, false, 128, true));
 
     // DSv4 quality mode without explicit sparse indices.
     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {8, 1}, 512, 32, true, false, 0, 0,

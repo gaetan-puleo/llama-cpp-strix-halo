@@ -1712,6 +1712,7 @@ static __global__ void flash_attn_ext_f16(
         const int  * sparse_indices_ptr,
         const int32_t sparse_raw,
         const int32_t sparse_count,
+        const int32_t sparse_indexed_raw,
         float      * dst_ptr,
         float2     * dst_meta_ptr,
         const float scale,
@@ -1737,7 +1738,7 @@ static __global__ void flash_attn_ext_f16(
     const int  * GGML_CUDA_RESTRICT KV_max   = KV_max_ptr;
     float      * GGML_CUDA_RESTRICT dst      = dst_ptr;
     float2     * GGML_CUDA_RESTRICT dst_meta = dst_meta_ptr;
-    GGML_UNUSED_VARS(sparse_indices_ptr, sparse_raw, sparse_count);
+    GGML_UNUSED_VARS(sparse_indices_ptr, sparse_raw, sparse_count, sparse_indexed_raw);
 
     // Skip unused kernel variants for faster compilation:
     if (use_logit_softcap && !(DKQ == 128 || DKQ == 256 || DKQ == 512)) {

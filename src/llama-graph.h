@@ -547,8 +547,10 @@ public:
 
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
+    ggml_tensor * get_local_k_idxs() const { return self_local_k_idxs; }
 
     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
+    ggml_tensor * self_local_k_idxs = nullptr; // I32 [n_swa, n_batch/n_stream, 1, n_stream]
 
     ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
@@ -1142,7 +1144,9 @@ struct llm_graph_context {
                     int   il,
             ggml_tensor * sparse_indices = nullptr,
                 int32_t   n_sparse_raw = 0,
-                   bool   optimized_attn = false) const;
+                   bool   optimized_attn = false,
+                int32_t   n_sparse_indexed_raw = -1,
+                   bool   sparse_kv_split = false) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

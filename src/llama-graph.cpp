@@ -962,6 +962,10 @@ void llm_graph_input_dsv4_raw::set_input(const llama_ubatch * ubatch) {
         mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
     }
 
+    if (self_local_k_idxs && self_local_k_idxs->buffer) {
+        mctx->set_input_local_k_idxs(self_local_k_idxs, self_kq_mask, ubatch);
+    }
+
     if (self_k_rot) {
         mctx->set_input_k_rot(self_k_rot);
     }
@@ -1014,6 +1018,10 @@ bool llm_graph_input_dsv4::can_reuse(const llm_graph_params & params) {
     }
     if (inp_raw->self_kq_mask && inp_raw->self_kq_mask->buffer) {
         res &= dsv4_can_reuse_raw_kq_mask(inp_raw->self_kq_mask, raw_ctx, params.ubatch, n_stream);
+    }
+    if (inp_raw->self_local_k_idxs && inp_raw->self_local_k_idxs->buffer) {
+        res &= inp_raw->self_local_k_idxs->ne[1] == params.ubatch.n_tokens/n_stream;
+        res &= inp_raw->self_local_k_idxs->ne[3] == n_stream;
     }
 
     res &= dsv4_can_reuse_comp_input(inp_csa, plan_csa, params.ubatch.n_tokens, n_stream);
@@ -2526,7 +2534,16 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                  int   il,
          ggml_tensor * sparse_indices,
              int32_t   n_sparse_raw,
-                bool   optimized_attn) const {
+                bool   optimized_attn,
+             int32_t   n_sparse_indexed_raw,
+                bool   sparse_kv_split) const {
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    if (sparse_kv_split && !use_flash_attn) {
+        k = ggml_concat(ctx0, k, v, 2);
+        v = k;
+        sparse_kv_split = false;
+    }
+
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -2540,7 +2557,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
@@ -2565,7 +2581,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
         ggml_flash_attn_ext_set_optimized(cur, optimized_attn);
         if (sparse_indices) {
-            ggml_flash_attn_ext_add_sparse_indices(cur, sparse_indices, n_sparse_raw);
+            if (sparse_kv_split) {
+                ggml_flash_attn_ext_add_sparse_indices_kv_split(cur, sparse_indices, n_sparse_indexed_raw);
+            } else if (n_sparse_indexed_raw >= 0) {
+                ggml_flash_attn_ext_add_sparse_indices_split(cur, sparse_indices, n_sparse_raw, n_sparse_indexed_raw);
+            } else {
+                ggml_flash_attn_ext_add_sparse_indices(cur, sparse_indices, n_sparse_raw);
+            }
         }
 
         if (v_mla) {
@@ -3349,6 +3371,10 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
     inp_raw->self_k_idxs = raw_ctx->build_input_k_idxs(ctx0, ubatch);
     inp_raw->self_kq_mask = dsv4_build_raw_kq_mask(ctx0, raw_ctx, ubatch, cparams, n_stream);
     inp_raw->self_kq_mask_cnv = inp_raw->self_kq_mask;
+    inp_raw->self_local_k_idxs = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32,
+            hparams.n_swa, ubatch.n_tokens/n_stream, 1, n_stream);
+    ggml_set_input(inp_raw->self_local_k_idxs);
+    ggml_set_name(inp_raw->self_local_k_idxs, "dsv4_raw_local_k_idxs");
 
     inp_raw->self_k_rot = raw_ctx->build_input_k_rot(ctx0);
     auto inp = std::make_unique<llm_graph_input_dsv4>(cparams, std::move(inp_raw), mctx_cur);

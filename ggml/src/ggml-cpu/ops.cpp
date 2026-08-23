@@ -8435,6 +8435,7 @@ static void ggml_compute_forward_top_k_f32(
     const int64_t nr = ggml_nrows(src0);
 
     const int top_k = ne0;
+    const bool sorted = ggml_get_op_params_i32(dst, 0) != 0;
 
     int32_t * tmp = (int32_t *) params->wdata + (ne00 + CACHE_LINE_SIZE_F32) * ith;
 
@@ -8451,8 +8452,8 @@ static void ggml_compute_forward_top_k_f32(
 
         std::copy(tmp, tmp + top_k, dst_data);
 
-        // emphasize that the order is not important
-        if (top_k > 1) {
+        // emphasize that the order is not important for the ordinary operation
+        if (!sorted && top_k > 1) {
             std::swap(dst_data[0], dst_data[1]);
         }
     }
@@ -8489,6 +8490,11 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * v     = dst->src[2];
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
+    const ggml_tensor * sparse_indices = dst->src[5];
+    const bool split_kv = sparse_indices && ggml_get_op_params_i32(dst, 8) != 0;
+    const int64_t sparse_raw = split_kv ? ggml_get_op_params_i32(dst, 4) : 0;
+    const int64_t sparse_count = split_kv ? ggml_get_op_params_i32(dst, 5) : 0;
+    const int64_t sparse_indexed_raw = split_kv ? ggml_get_op_params_i32(dst, 7) : 0;
 
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
@@ -8577,7 +8583,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         ggml_fp16_t * VKQ16 = (ggml_fp16_t *) (VKQ32 + 1*DV); // (temporary) FP16 VKQ accumulator
         ggml_fp16_t * Q_q   = (ggml_fp16_t *) (VKQ32 + 2*DV); // (temporary) buffer for Q converted to quantized/FP16
 
-        if (v->type == GGML_TYPE_F16) {
+        if (v->type == GGML_TYPE_F16 && !split_kv) {
             memset(VKQ16, 0, DV*sizeof(ggml_fp16_t));
         } else {
             memset(VKQ32, 0, DV*sizeof(float));
@@ -8596,19 +8602,36 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const float * pq = (const float *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
         q_to_vec_dot(pq, Q_q, DK);
 
+        const int32_t * sparse_row = split_kv ? (const int32_t *) ((const char *) sparse_indices->data + iq1*sparse_indices->nb[1] + iq3*sparse_indices->nb[3]) : nullptr;
+
         // online softmax / attention
         // loop over n_kv and n_head_kv
         // ref: https://arxiv.org/pdf/2112.05682.pdf
 
         for (int64_t ic = ic_start; ic < ic_end; ++ic) {
-            const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[ic]) : 0.0f;
+            bool from_csa = false;
+            int64_t i_row = ic;
+            int64_t i_mask = ic;
+            if (split_kv) {
+                GGML_ASSERT(ic < sparse_count);
+                i_row = sparse_row[ic];
+                if (i_row < 0) {
+                    continue;
+                }
+                from_csa = ic >= sparse_indexed_raw;
+                i_mask = from_csa ? sparse_raw + i_row : i_row;
+            }
+
+            const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[i_mask]) : 0.0f;
             if (mv == -INFINITY) {
                 continue;
             }
 
             float s; // KQ value
 
-            const char * k_data = (const char *) k->data + ( ic*nbk1 + ik2*nbk2 + ik3*nbk3);
+            const char * k_data = from_csa ?
+                (const char *) v->data + (i_row*nbv1 + iv2*nbv2 + iv3*nbv3) :
+                (const char *) k->data + (i_row*nbk1 + ik2*nbk2 + ik3*nbk3);
             kq_vec_dot(DK, &s, 0, k_data, 0, Q_q, 0, 1);
 
             s = s*scale; // scale KQ value
@@ -8624,9 +8647,9 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             float ms = 1.0f; // upon new higher max val, scale VKQ and KQ sum with this value
             float vs = 1.0f; // post-softmax KQ value, expf(s - M)
 
-            const char * v_data = ((const char *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3));
+            const char * v_data = split_kv ? k_data : ((const char *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3));
 
-            if (v->type == GGML_TYPE_F16) {
+            if (v->type == GGML_TYPE_F16 && !split_kv) {
                 if (s > M) {
                     // s is new maximum, ms < 1.0f, vs == expf(s - s) == 1.0f
                     M = s;
@@ -8667,7 +8690,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             S = S*ms + vs; // scale and increment sum with partial sum
         }
 
-        if (v->type == GGML_TYPE_F16) {
+        if (v->type == GGML_TYPE_F16 && !split_kv) {
             for (int64_t d = 0; d < DV; ++d) {
                 VKQ32[d] = GGML_CPU_FP16_TO_FP32(VKQ16[d]);
             }
@@ -9081,6 +9104,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const ggml_tensor * q     = dst->src[0];
     const ggml_tensor * k     = dst->src[1];
     const ggml_tensor * v     = dst->src[2];
+    const bool split_kv = dst->src[5] && ggml_get_op_params_i32(dst, 8) != 0;
 
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
@@ -9123,7 +9147,8 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const bool use_ref = params->use_ref;
 
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
+    const int64_t n_kv = split_kv ? ggml_get_op_params_i32(dst, 5) : nek1;
+    const bool use_split_kv_path = !split_kv && !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
 
     if (use_split_kv_path) {
         const int64_t chunk_size = (nek1 + nth - 1) / nth;
@@ -9180,7 +9205,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
         const int64_t dr = (nr + nchunk - 1) / nchunk;
 
         static constexpr int64_t Q_TILE_SZ  = ggml_fa_tile_config::Q;
-        bool use_tiled = !use_ref &&
+        bool use_tiled = !split_kv && !use_ref &&
                                (q->type == GGML_TYPE_F32 &&
                                 kv_is_f32_or_f16 &&
                                 k->type == v->type &&
@@ -9202,7 +9227,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
             if (use_tiled) {
                 ggml_compute_forward_flash_attn_ext_tiled(params, dst, ir0, ir1);
             } else {
-                ggml_compute_forward_flash_attn_ext_f16_one_chunk(params, dst, ir0, ir1, 0, nek1, nullptr, 0);
+                ggml_compute_forward_flash_attn_ext_f16_one_chunk(params, dst, ir0, ir1, 0, n_kv, nullptr, 0);
             }
 
             current_chunk = ggml_threadpool_chunk_add(params->threadpool, 1);

@@ -255,7 +255,7 @@ static __global__ void lightning_indexer_kernel_wmma_amd(
 
     constexpr int tile_size = 16;
     constexpr int warps_per_block = 8;
-    constexpr int heads_per_tile = 4;
+    constexpr int heads_per_tile = 1;
     constexpr int stride = N_EMBD/2 + 4;
 
     const int lane        = threadIdx.x;
@@ -625,7 +625,7 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int cc     = ggml_cuda_info().devices[device].cc;
 
 #if defined(GGML_USE_HIP)
-    constexpr int candidate_margin = 32;
+    constexpr int candidate_margin = 128;
     const int top_k = ggml_get_op_params_i32(dst, 0);
     if (n_embd == 128 && n_head == 64 && amd_wmma_available(cc) && k->type == GGML_TYPE_F16 && n_batch >= 16 && top_k > 0 && top_k <= n_kv - candidate_margin) {
         const int candidate_limit = top_k + candidate_margin;

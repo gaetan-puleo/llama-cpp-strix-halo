@@ -126,6 +126,43 @@ static __global__ void top_k_radix_f32_i32(
     }
 }
 
+static __global__ void top_k_sort_selected_f32_i32(
+        const float * __restrict__ src,
+        int * __restrict__ dst,
+        const int ncols,
+        const int k) {
+    const float * src_row = src + (size_t) blockIdx.x*ncols;
+    int * dst_row = dst + (size_t) blockIdx.x*k;
+    extern __shared__ int ids[];
+
+    const int col = threadIdx.x;
+    ids[col] = dst_row[col];
+    __syncthreads();
+
+    for (int size = 2; size <= k; size *= 2) {
+        for (int stride = size/2; stride > 0; stride /= 2) {
+            const int other = col ^ stride;
+            if (other > col) {
+                const int left_id = ids[col];
+                const int right_id = ids[other];
+                const uint32_t left_key = top_k_ordered_key(src_row[left_id]);
+                const uint32_t right_key = top_k_ordered_key(src_row[right_id]);
+                const bool descending = (col & size) == 0;
+                const bool swap = descending ?
+                    (left_key < right_key || (left_key == right_key && left_id > right_id)) :
+                    (left_key > right_key || (left_key == right_key && left_id < right_id));
+                if (swap) {
+                    ids[col] = right_id;
+                    ids[other] = left_id;
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    dst_row[col] = ids[col];
+}
+
 void ggml_cuda_top_k_f32_i32(
         ggml_backend_cuda_context & ctx,
         const float * src,
@@ -162,6 +199,11 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(k > 0 && k <= INT_MAX);
 
         ggml_cuda_top_k_f32_i32(ctx, src0_d, dst_d, ncols, (uint32_t) nrows, k);
+        if (ggml_get_op_params_i32(dst, 0) != 0) {
+            GGML_ASSERT((k & (k - 1)) == 0 && k <= 1024);
+            top_k_sort_selected_f32_i32<<<nrows, k, k*sizeof(int), stream>>>(src0_d, dst_d, ncols, k);
+            CUDA_CHECK(cudaGetLastError());
+        }
         return;
     }
 #endif // GGML_USE_HIP

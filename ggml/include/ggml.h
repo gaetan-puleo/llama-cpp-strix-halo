@@ -2409,6 +2409,12 @@ extern "C" {
             struct ggml_tensor  * a,
             int                   k);
 
+    // top k elements per row, ordered by descending value
+    GGML_API struct ggml_tensor * ggml_top_k_sorted(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   k);
+
     GGML_API struct ggml_tensor * ggml_arange(
             struct ggml_context * ctx,
             float                 start,
@@ -2456,6 +2462,18 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * indices,
             int32_t              n_raw);
+
+    GGML_API void ggml_flash_attn_ext_add_sparse_indices_split(
+            struct ggml_tensor * a,
+            struct ggml_tensor * indices,
+            int32_t              n_raw,
+            int32_t              n_indexed_raw);
+
+    // K and V are separate raw and compressed K=V cache regions.
+    GGML_API void ggml_flash_attn_ext_add_sparse_indices_kv_split(
+            struct ggml_tensor * a,
+            struct ggml_tensor * indices,
+            int32_t              n_indexed_raw);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

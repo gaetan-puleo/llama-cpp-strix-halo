@@ -28,6 +28,7 @@ static __global__ void flash_attn_ext_vec(
         const int  * sparse_indices_ptr,
         const int32_t sparse_raw,
         const int32_t sparse_count,
+        const int32_t sparse_indexed_raw,
         float      * dst_ptr,
         float2     * dst_meta_ptr,
         const float scale,
@@ -56,7 +57,7 @@ static __global__ void flash_attn_ext_vec(
 
     // Skip unused kernel variants for faster compilation:
     if (use_logit_softcap && !(D == 128 || D == 256)) {
-        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, sparse_indices_ptr, sparse_raw, sparse_count, dst, dst_meta, scale,
+        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, sparse_indices_ptr, sparse_raw, sparse_count, sparse_indexed_raw, dst, dst_meta, scale,
             max_bias, m0, m1, n_head_log2, logit_softcap,
             ne00, ne01, ne02, ne03,
                   nb01, nb02, nb03,

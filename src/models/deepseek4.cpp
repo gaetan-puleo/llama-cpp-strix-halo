@@ -697,39 +697,10 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
     }
 
     const uint32_t n_top_k = indexer_score->ne[0] < hparams.indexer_top_k ? indexer_score->ne[0] : hparams.indexer_top_k;
-    ggml_tensor * top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
+    ggml_tensor * top_k = ggml_cont(ctx0, ggml_top_k_sorted(ctx0, indexer_score, n_top_k));
     cb(top_k, "lid_top_k", il);
 
     return top_k;
-}
-
-ggml_tensor * llama_model_deepseek4::graph::build_top_k_mask(
-        ggml_tensor * kq_mask,
-        ggml_tensor * top_k,
-        const char * name,
-        int il) const {
-    GGML_ASSERT(kq_mask);
-    GGML_ASSERT(top_k);
-
-    ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
-    kq_mask_all = ggml_view_4d(ctx0, kq_mask_all, 1, kq_mask_all->ne[0], kq_mask_all->ne[1], kq_mask_all->ne[3],
-            kq_mask_all->nb[0], kq_mask_all->nb[1], kq_mask_all->nb[2], 0);
-
-    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1,
-            top_k->nb[1], top_k->nb[2], top_k->ne[3]*top_k->nb[3], 0);
-
-    ggml_tensor * zeros = ggml_new_tensor_4d(ctx0, cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32, 1, top_k_3d->ne[0], top_k_3d->ne[1], top_k_3d->ne[2]);
-    zeros = ggml_fill(ctx0, zeros, 0.0f);
-
-    ggml_tensor * kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, zeros, top_k_3d);
-    kq_mask_top_k = ggml_view_4d(ctx0, kq_mask_top_k,
-            kq_mask_top_k->ne[1], kq_mask_top_k->ne[2], 1, kq_mask_top_k->ne[3],
-            kq_mask_top_k->nb[2], kq_mask_top_k->nb[3], kq_mask_top_k->nb[3], 0);
-
-    kq_mask_top_k = ggml_add(ctx0, kq_mask_top_k, kq_mask);
-    cb(kq_mask_top_k, name, il);
-
-    return kq_mask_top_k;
 }
 
 ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
@@ -773,22 +744,18 @@ ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
             csa_k->nb[1], csa_k->nb[2], csa_k->nb[3], 0);
     cb(csa_k, "csa_comp_k", il);
 
-    ggml_tensor * top_k = nullptr;
     ggml_tensor * raw_mask = inp_attn->get_kq_mask();
+    ggml_tensor * top_k = build_lid_top_k(model, inp_dsv4, qr, cur, inp_pos, il);
     ggml_tensor * csa_mask = inp_csa.kq_mask;
-    if (n_csa > hparams.indexer_top_k) {
-        top_k = build_lid_top_k(model, inp_dsv4, qr, cur, inp_pos, il);
-        csa_mask = build_top_k_mask(inp_csa.kq_mask, top_k, "csa_top_k_mask", il);
-    }
-
-    ggml_tensor * k_all = ggml_concat(ctx0, raw_k, csa_k, 2);
-    cb(k_all, "csa_k_all", il);
 
     ggml_tensor * kq_mask = ggml_concat(ctx0, raw_mask, csa_mask, 0);
     cb(kq_mask, "csa_lid_kq_mask", il);
 
-    ggml_tensor * out = build_attn_mha(q, k_all, k_all, nullptr, kq_mask, sinks, nullptr, kq_scale, il,
-            nullptr, raw_k->ne[2], false);
+    ggml_tensor * sparse_indices = ggml_concat(ctx0, inp_attn->get_local_k_idxs(), top_k, 0);
+    cb(sparse_indices, "csa_sparse_indices", il);
+
+    ggml_tensor * out = build_attn_mha(q, raw_k, csa_k, nullptr, kq_mask, sinks, nullptr, kq_scale, il,
+            sparse_indices, raw_k->ne[2], false, inp_attn->get_local_k_idxs()->ne[0], true);
     if (k_rot) {
         out = llama_mul_mat_hadamard(ctx0, out, k_rot);
     }
@@ -1257,6 +1224,9 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
 
     out = ggml_reshape_3d(ctx0, out, o_group_dim, n_groups, nt);
     out = ggml_permute(ctx0, out, 0, 2, 1, 3);
+    if (nt > 1 && nt <= 8) {
+        out = ggml_cont(ctx0, out);
+    }
     ggml_tensor * oa = ggml_mul_mat(ctx0, layer.wo_a, out);
     cb(oa, "attn_wo_a", il);
     oa = ggml_permute(ctx0, oa, 0, 2, 1, 3);
