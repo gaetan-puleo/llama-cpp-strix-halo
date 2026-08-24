@@ -971,21 +971,7 @@ static __global__ void mul_mat_q(
 
     const uint32_t nty = (nrows_x + I - 1) / I; // Number of tiles y
 
-    // Initialize the ids for writing back data with just the index.
-    // For regular matrix multiplications this is never changed.
-    // For MoE the correct indices are loaded from ids_dst.
     extern __shared__ int ids_dst_shared[]; // Stored at beginning of shared memory.
-#pragma unroll
-    for (int j0 = 0; j0 < J; j0 += nwarps*warp_size) {
-        const int j = j0 + threadIdx.y*warp_size + threadIdx.x;
-
-        if (j0 + nwarps*warp_size > J && j >= J) {
-            break;
-        }
-
-        ids_dst_shared[j] = j;
-    }
-    __syncthreads();
 
     if constexpr (!ggml_cuda_mmq_get_stream_k(type, J, fallback)) {
         const uint2 tmp2 = fast_div_modulo(blockIdx.z, nchannels_y);
@@ -1034,6 +1020,18 @@ static __global__ void mul_mat_q(
                 ids_dst_shared[j] = ids_dst[col_low + jt*J + j];
             }
             __syncthreads();
+        } else {
+#pragma unroll
+            for (int j0 = 0; j0 < J; j0 += nwarps*warp_size) {
+                const int j = j0 + threadIdx.y*warp_size + threadIdx.x;
+
+                if (j0 + nwarps*warp_size > J && j >= J) {
+                    break;
+                }
+
+                ids_dst_shared[j] = j;
+            }
+            __syncthreads();
         }
 
         offset_y   += (col_low + jt*J)*(sizeof(block_q8_1_mmq)/sizeof(int));
@@ -1056,6 +1054,18 @@ static __global__ void mul_mat_q(
              tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z);
         return;
     }
+
+#pragma unroll
+    for (int j0 = 0; j0 < J; j0 += nwarps*warp_size) {
+        const int j = j0 + threadIdx.y*warp_size + threadIdx.x;
+
+        if (j0 + nwarps*warp_size > J && j >= J) {
+            break;
+        }
+
+        ids_dst_shared[j] = j;
+    }
+    __syncthreads();
 
     constexpr int ITER_K          = ggml_cuda_mmq_get_K_vram(type, J, fallback);
     constexpr int blocks_per_iter = ITER_K / qk;
