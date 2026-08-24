@@ -576,13 +576,29 @@ static __device__ __forceinline__ void flash_attn_tile_iter_KQ(
 #endif // FAST_FP16_AVAILABLE
         }
 
+#if defined(RDNA3_5)
+        if constexpr (DKQ == 256 && ncols == 32) {
 #pragma unroll
-        for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
+            for (int k = 0; k < cpy_ne; ++k) {
 #pragma unroll
-            for (int jc0 = 0; jc0 < cpw; ++jc0) {
+                for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
 #pragma unroll
-                for (int k = 0; k < cpy_ne; ++k) {
-                    ggml_cuda_mad(KQ_acc[i_KQ_0/(np*warp_size)*cpw + jc0], K_k[i_KQ_0/(np*warp_size)][k], Q_k[jc0][k]);
+                    for (int jc0 = 0; jc0 < cpw; ++jc0) {
+                        ggml_cuda_mad(KQ_acc[i_KQ_0/(np*warp_size)*cpw + jc0], K_k[i_KQ_0/(np*warp_size)][k], Q_k[jc0][k]);
+                    }
+                }
+            }
+        } else
+#endif // defined(RDNA3_5)
+        {
+#pragma unroll
+            for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
+#pragma unroll
+                for (int jc0 = 0; jc0 < cpw; ++jc0) {
+#pragma unroll
+                    for (int k = 0; k < cpy_ne; ++k) {
+                        ggml_cuda_mad(KQ_acc[i_KQ_0/(np*warp_size)*cpw + jc0], K_k[i_KQ_0/(np*warp_size)][k], Q_k[jc0][k]);
+                    }
                 }
             }
         }
