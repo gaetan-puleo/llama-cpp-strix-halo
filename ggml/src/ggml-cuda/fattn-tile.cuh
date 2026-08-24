@@ -850,6 +850,9 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
 
 template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool q8_0_KV> // D == head size
 __launch_bounds__(ggml_cuda_fattn_tile_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_tile_get_occupancy(DKQ, DV, ncols1*ncols2))
+#if defined(RDNA3_5) && defined(GGML_CUDA_FATTN_VGPR192)
+__attribute__((amdgpu_num_vgpr(192)))
+#endif // defined(RDNA3_5) && defined(GGML_CUDA_FATTN_VGPR192)
 static __global__ void flash_attn_tile(
         const char * Q_ptr,
         const char * K_ptr,
@@ -1203,6 +1206,10 @@ static __global__ void flash_attn_tile(
 #endif // FLASH_ATTN_AVAILABLE
 }
 
+#ifdef GGML_USE_HIP
+fattn_kernel_t ggml_cuda_fattn_tile_d256_ncols32_rdna3_5(const bool use_logit_softcap);
+#endif // GGML_USE_HIP
+
 template <int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap>
 static void launch_fattn_tile_case(
         ggml_backend_cuda_context & ctx, ggml_tensor * dst, const int nwarps, const int nbatch_fa, const int warp_size) {
@@ -1217,6 +1224,12 @@ static void launch_fattn_tile_case(
             : flash_attn_tile<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
     } else {
         fattn_kernel = flash_attn_tile<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+    }
+    if constexpr (DKQ == 256 && DV == 256 && ncols1 == 4 && ncols2 == 8) {
+        const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+        if (GGML_CUDA_CC_IS_RDNA3_5(cc)) {
+            fattn_kernel = ggml_cuda_fattn_tile_d256_ncols32_rdna3_5(use_logit_softcap);
+        }
     }
 #else
     fattn_kernel = flash_attn_tile<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
