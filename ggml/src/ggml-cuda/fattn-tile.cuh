@@ -656,6 +656,19 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         KQ_max_new[jc0] = KQ_max[jc0];
     }
 
+#if defined(RDNA3_5)
+    constexpr bool common_mask = DKQ == 256 && DV == 256 && ncols1 == 4 && ncols2 == 8;
+    const int j_mask = common_mask ? fastmodulo(col_Q_0 + ((threadIdx.y / np)*cpw)/ncols2, ne01) : 0;
+    float mask_value[common_mask ? nbatch_fa/(np*warp_size) : 1];
+#pragma unroll
+    for (int i0 = 0; i0 < nbatch_fa; i0 += np*warp_size) {
+        mask_value[i0/(np*warp_size)] = common_mask ? slope*__half2float(mask[j_mask*stride_mask + k_VKQ_0 + i0 + (threadIdx.y % np)*warp_size + threadIdx.x]) : 0.0f;
+    }
+#else
+    constexpr bool common_mask = false;
+    const float mask_value[1] = {0.0f};
+#endif
+
     float KQ_acc[nbatch_fa/(np*warp_size) * cpw] = {0.0f}; // Accumulators for KQ matrix multiplication.
 
     // KQ = K @ Q matrix multiplication:
@@ -691,8 +704,8 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
             }
 
             if (!oob_check || i_KQ < k_VKQ_sup) {
-                KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] += (ncols2 > 1 || mask) ?
-                    slope*__half2float(mask[j*stride_mask + k_VKQ_0 + i_KQ]) : 0.0f;
+                KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] += common_mask ? mask_value[i_KQ_0/(np*warp_size)] :
+                    (ncols2 > 1 || mask) ? slope*__half2float(mask[j*stride_mask + k_VKQ_0 + i_KQ]) : 0.0f;
 
                 KQ_max_new[jc0] = fmaxf(KQ_max_new[jc0], KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] + FATTN_KQ_MAX_OFFSET);
             }
