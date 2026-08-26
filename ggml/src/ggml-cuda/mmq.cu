@@ -21,7 +21,9 @@ static bool use_rdna3_5_q45_id_narrow(const mmq_args & args) {
     const int64_t rows_per_channel = (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y;
     const bool ornith = ((args.ncols_x == 2048 && args.nrows_x == 512) ||
         (args.ncols_x == 512 && args.nrows_x == 2048)) && args.nchannels_x == 256 && rows_per_channel == 64;
-    return ornith;
+    const bool qwen122 = ((args.ncols_x == 3072 && args.nrows_x == 1024) ||
+        (args.ncols_x == 1024 && args.nrows_x == 3072)) && args.nchannels_x == 256 && rows_per_channel == 64;
+    return ornith || qwen122;
 }
 
 static bool use_rdna3_5_q5_ling(const mmq_args & args) {
