@@ -167,6 +167,7 @@ class Keys:
         SELECTOR_RANK                     = "{arch}.selector_rank"
         SELECTOR_TOP_K                    = "{arch}.selector_top_k"
         SAMPLE_FROM_ANCHOR                = "{arch}.sample_from_anchor"
+        HAS_CONFIDENCE_HEAD               = "{arch}.has_confidence_head"
         NORM_BEFORE_RESIDUAL              = "{arch}.norm_before_residual"
         NORM_BEFORE_FC                    = "{arch}.norm_before_fc"
 
@@ -2907,6 +2908,9 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE_EXP,
         MODEL_TENSOR.FFN_GATE_UP_EXP,
         MODEL_TENSOR.PER_LAYER_TOKEN_EMBD,
+        MODEL_TENSOR.NEXTN_EH_PROJ,
+        MODEL_TENSOR.NEXTN_ENORM,
+        MODEL_TENSOR.NEXTN_HNORM,
         MODEL_TENSOR.PLE_KEY,
         MODEL_TENSOR.PLE_VALUE,
         MODEL_TENSOR.PLE_NORM_KEY,

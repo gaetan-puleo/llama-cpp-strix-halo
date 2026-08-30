@@ -777,11 +777,14 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_UNARY_NEG:
         case HTP_OP_UNARY_EXP:
         case HTP_OP_UNARY_TANH:
+        case HTP_OP_UNARY_ABS:
+        case HTP_OP_UNARY_LOG:
         case HTP_OP_L2_NORM:
             return op_unary(octx);
 
         case HTP_OP_GLU_SWIGLU:
         case HTP_OP_GLU_SWIGLU_OAI:
+        case HTP_OP_GLU_SWIGLU_CLAMP:
         case HTP_OP_GLU_GEGLU:
             return op_activations(octx);
 

@@ -2275,17 +2275,26 @@ struct llama_model_qwen35 : public llama_model_base {
 };
 
 
+struct llama_ple_disk;
+
 struct llama_model_qwen4exp : public llama_model_base {
     llama_model_qwen4exp(const struct llama_model_params & params) : llama_model_base(params) {}
 
     class llm_graph_input_qsa;
 
+    // Set when the n-gram table is left on disk (--ngram-on-disk): per_layer_tok_embd is
+    // counted as created but never allocated, mapped or read, and build_ple takes its
+    // rows from this reader instead of ggml_get_rows.
+    std::shared_ptr<llama_ple_disk> ple_disk;
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
     struct graph : public llm_build_delta_net_base {
         graph(const llama_model & model, const llm_graph_params & params);
-    private:
+    protected:
+        // members only, no trunk: graph_mtp builds its own single block
+        graph(const llama_model & model, const llm_graph_params & params, bool mtp);
+
         // HC replaces every layer norm: residual is [n_embd, hc, n_tokens]
         ggml_tensor * build_hc_mix(
                     ggml_tensor * x,
@@ -2360,9 +2369,12 @@ struct llama_model_qwen4exp : public llama_model_base {
                         int64_t   channels,
                             int   il);
 
+        ggml_tensor * build_inp_ple(
+  const llama_memory_hybrid_idx_context * mctx_hyb);
+
         ggml_tensor * build_ple(
              llm_graph_input_rs * inp,
-  const llama_memory_hybrid_idx_context * mctx_hyb,
+                    ggml_tensor * emb,
                     ggml_tensor * hidden,
                             int   il);
 
@@ -2372,6 +2384,10 @@ struct llama_model_qwen4exp : public llama_model_base {
                             int   il);
 
         const llama_model & model;
+    };
+
+    struct graph_mtp : public graph {
+        graph_mtp(const llama_model & model, const llm_graph_params & params);
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
