@@ -5,26 +5,8 @@
 
 #include <cstdint>
 
-void launch_mul_mat_q_q4_k_j48(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream);
 void launch_mul_mat_q_q5_k_j32(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream);
 void launch_mul_mat_q_q6_k_j32(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream);
-void launch_mul_mat_q_q8_0_j48(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream);
-
-static bool use_rdna3_5_q45_id_narrow(const mmq_args & args) {
-    const int id = ggml_cuda_get_device();
-    const int cc = ggml_cuda_info().devices[id].cc;
-    if ((args.type_x != GGML_TYPE_Q4_K && args.type_x != GGML_TYPE_Q5_K) || !GGML_CUDA_CC_IS_RDNA3_5(cc) ||
-            args.ids_dst == nullptr || args.nchannels_y <= 0) {
-        return false;
-    }
-
-    const int64_t rows_per_channel = (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y;
-    const bool ornith = ((args.ncols_x == 2048 && args.nrows_x == 512) ||
-        (args.ncols_x == 512 && args.nrows_x == 2048)) && args.nchannels_x == 256 && rows_per_channel == 64;
-    const bool qwen122 = ((args.ncols_x == 3072 && args.nrows_x == 1024) ||
-        (args.ncols_x == 1024 && args.nrows_x == 3072)) && args.nchannels_x == 256 && rows_per_channel == 64;
-    return ornith || qwen122;
-}
 
 static bool use_rdna3_5_q5_ling(const mmq_args & args) {
     const int id = ggml_cuda_get_device();
@@ -41,24 +23,6 @@ static bool use_rdna3_5_q6_ling_j32(const mmq_args & args) {
     return args.type_x == GGML_TYPE_Q6_K && GGML_CUDA_CC_IS_RDNA3_5(cc) && args.ids_dst != nullptr &&
         args.ncols_x == 768 && args.nrows_x == 2560 && args.nchannels_x == 512 && args.nchannels_y > 0 &&
         (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y == 32;
-}
-
-static bool use_rdna3_5_q6_id_narrow(const mmq_args & args) {
-    const int id = ggml_cuda_get_device();
-    const int cc = ggml_cuda_info().devices[id].cc;
-    return args.type_x == GGML_TYPE_Q6_K && GGML_CUDA_CC_IS_RDNA3_5(cc) && args.ids_dst != nullptr &&
-        ((args.ncols_x == 2048 && args.nrows_x == 512) || (args.ncols_x == 512 && args.nrows_x == 2048)) &&
-        args.nchannels_x == 256 && args.nchannels_y > 0 &&
-        (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y == 64;
-}
-
-static bool use_rdna3_5_q8_id_narrow(const mmq_args & args) {
-    const int id = ggml_cuda_get_device();
-    const int cc = ggml_cuda_info().devices[id].cc;
-    return args.type_x == GGML_TYPE_Q8_0 && GGML_CUDA_CC_IS_RDNA3_5(cc) && args.ids_dst != nullptr &&
-        ((args.ncols_x == 2048 && args.nrows_x == 512) || (args.ncols_x == 512 && args.nrows_x == 2048)) &&
-        args.nchannels_x == 256 && args.nchannels_y > 0 &&
-        (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y == 64;
 }
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
@@ -82,11 +46,7 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, args, stream);
             break;
         case GGML_TYPE_Q8_0:
-            if (use_rdna3_5_q8_id_narrow(args)) {
-                launch_mul_mat_q_q8_0_j48(ctx, args, stream);
-            } else {
-                mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, args, stream);
-            }
+            mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, args, stream);
             break;
 // -----------------------------------------------------------------------
         case GGML_TYPE_Q2_K:
@@ -96,23 +56,17 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             mul_mat_q_case<GGML_TYPE_Q3_K>(ctx, args, stream);
             break;
         case GGML_TYPE_Q4_K:
-            if (use_rdna3_5_q45_id_narrow(args)) {
-                launch_mul_mat_q_q4_k_j48(ctx, args, stream);
-            } else {
-                mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, args, stream);
-            }
+            mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, args, stream);
             break;
         case GGML_TYPE_Q5_K:
             if (use_rdna3_5_q5_ling(args)) {
-                launch_mul_mat_q_q5_k_j32(ctx, args, stream);
-            } else if (use_rdna3_5_q45_id_narrow(args)) {
                 launch_mul_mat_q_q5_k_j32(ctx, args, stream);
             } else {
                 mul_mat_q_case<GGML_TYPE_Q5_K>(ctx, args, stream);
             }
             break;
         case GGML_TYPE_Q6_K:
-            if (use_rdna3_5_q6_ling_j32(args) || use_rdna3_5_q6_id_narrow(args)) {
+            if (use_rdna3_5_q6_ling_j32(args)) {
                 launch_mul_mat_q_q6_k_j32(ctx, args, stream);
             } else {
                 mul_mat_q_case<GGML_TYPE_Q6_K>(ctx, args, stream);
